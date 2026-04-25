@@ -2021,3 +2021,80 @@ class TestBuildStateMachineStopStrings:
                 assert tok in node
                 node = node[tok]
             assert "__match__" in node
+class TestTokenBufferSeedOnCacheHit:
+    """Tests for TokenBuffer seeding via all_tokens parameter (#fix).
+
+    When a cache hit restores KV state from a prior turn, the penalty
+    processors start with an empty token context. Passing all_tokens to
+    BatchGenerator.insert() seeds the TokenBuffer so penalties can dampen
+    repetition of tokens from the cached prefix.
+    """
+
+    def _make_mock_model_and_scheduler(self, mock_tokenizer):
+        """Create a scheduler with mocked batch_generator."""
+        model = MagicMock()
+        model.make_cache.return_value = []
+        model.clear_vlm_position_state = MagicMock()
+        model.register_rope_delta = MagicMock()
+
+        scheduler = Scheduler(model=model, tokenizer=mock_tokenizer)
+
+        mock_bg = MagicMock()
+        mock_bg.insert = MagicMock(return_value=[99])
+        scheduler.batch_generator = mock_bg
+
+        return scheduler
+
+    def test_insert_receives_all_tokens_on_cache_hit(self, mock_tokenizer):
+        """Exact cache hit passes prompt_token_ids[:-1] as all_tokens.
+
+        Cache hit on turn 2 with prompt [1,2,3,4], cached_tokens=3,
+        remaining=[4] should call insert with all_tokens=[[1,2,3]].
+        """
+        scheduler = self._make_mock_model_and_scheduler(mock_tokenizer)
+
+        request = Request(
+            request_id="cache-hit-001",
+            prompt=[11, 12, 13, 14],
+            sampling_params=SamplingParams(max_tokens=16),
+        )
+        request.prompt_token_ids = [11, 12, 13, 14]
+        request.num_prompt_tokens = 4
+        request.cached_tokens = 3
+        request.remaining_tokens = [14]
+        request.prompt_cache = MagicMock()  # signals cache hit
+
+        scheduler.waiting.append(request)
+        scheduler.requests[request.request_id] = request
+
+        scheduler._schedule_waiting()
+
+        scheduler.batch_generator.insert.assert_called_once()
+        call_kwargs = scheduler.batch_generator.insert.call_args.kwargs
+        assert "all_tokens" in call_kwargs
+        assert call_kwargs["all_tokens"] == [[11, 12, 13]]
+
+    def test_insert_receives_empty_all_tokens_on_single_token_prompt(self, mock_tokenizer):
+        """Single-token prompt passes [[[]]] as all_tokens (harmless)."""
+        scheduler = self._make_mock_model_and_scheduler(mock_tokenizer)
+
+        request = Request(
+            request_id="single-token-001",
+            prompt=[99],
+            sampling_params=SamplingParams(max_tokens=16),
+        )
+        request.prompt_token_ids = [99]
+        request.num_prompt_tokens = 1
+        request.cached_tokens = 0
+        request.remaining_tokens = [99]
+        request.prompt_cache = None
+
+        scheduler.waiting.append(request)
+        scheduler.requests[request.request_id] = request
+
+        scheduler._schedule_waiting()
+
+        scheduler.batch_generator.insert.assert_called_once()
+        call_kwargs = scheduler.batch_generator.insert.call_args.kwargs
+        assert "all_tokens" in call_kwargs
+        assert call_kwargs["all_tokens"] == [[]]

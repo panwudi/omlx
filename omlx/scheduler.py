@@ -4356,6 +4356,14 @@ class Scheduler:
             # See vllm-mlx-patched commit 8d4052b for the same root cause
             # in a sibling project, and #934 for the user-visible symptom.
             per_row_lps = list(logits_processors) if logits_processors else []
+            # all_tokens seeds the TokenBuffer used by penalty processors so they
+            # can see and penalize repetition of tokens from the cached prefix.
+            # prompt_token_ids[:-1] is correct for every path by this point:
+            #   - Exact cache hit: cached prefix (N-1 tokens)
+            #   - Partial cache hit + external prefill: cached prefix + pre-filled tokens
+            #   - Cache miss + external prefill: all pre-filled tokens
+            #   - Single-token prompt: [] (harmless)
+            all_tokens = [request.prompt_token_ids[:-1]]
             uids = self.batch_generator.insert(
                 [tokens_to_process],
                 max_tokens=[request.sampling_params.max_tokens],
@@ -4363,6 +4371,7 @@ class Scheduler:
                 samplers=[sampler],
                 logits_processors=[per_row_lps],
                 state_machines=[sm],
+                all_tokens=all_tokens,
             )
 
             if uids:
