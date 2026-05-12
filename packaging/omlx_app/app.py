@@ -361,23 +361,29 @@ class OMLXAppDelegate(NSObject):
           catch Tahoe's toggle-off.
         - button.window().isVisible: NSWindow's "attached to screen" flag;
           tends to flip False when the status item is blocked.
-        - button.window().occlusionState & NSWindowOcclusionStateVisible:
-          finer-grained compositing flag that's cleared when macOS parks
-          the window off-screen or in the blocked list.
+        - button.window().occlusionState: any non-zero state means
+          WindowServer is tracking the window (== visible/composited).
+          Sequoia signals visible via NSWindowOcclusionStateVisible (0x2);
+          Tahoe (macOS 26) signals it via a new bit (0x2000) instead.
+          Testing the specific 0x2 bit falsely reports hidden on Tahoe,
+          so we treat any non-zero state as visible — cleared-to-zero
+          remains the genuine hidden case (window parked / blocked).
 
         Treat the item as hidden if ANY of those strong signals say hidden.
         Emit a single WARNING with the raw signals when we return True, so
         a hidden icon always leaves a breadcrumb in menubar.log without
         spamming the log on every check while the icon is fine.
         """
-        NS_WINDOW_OCCLUSION_STATE_VISIBLE = 1 << 1  # NSWindowOcclusionStateVisible
-
         button = self.status_item.button() if self.status_item else None
         window = button.window() if button else None
         api_visible = bool(self.status_item and self.status_item.isVisible())
         window_visible = bool(window and window.isVisible())
         occlusion = int(window.occlusionState()) if window else 0
-        occlusion_visible = bool(occlusion & NS_WINDOW_OCCLUSION_STATE_VISIBLE)
+        # Any non-zero occlusion state means WindowServer is tracking the
+        # window, which on every macOS we ship to (Sequoia / Tahoe) implies
+        # visible. See docstring above for why bit-testing 0x2 alone fails
+        # on Tahoe.
+        occlusion_visible = occlusion != 0
 
         hidden = (
             not button
