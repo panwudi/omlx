@@ -374,12 +374,19 @@ async def create_transcription(
     file: UploadFile = File(...),
     model: str = Form(...),
     language: Optional[str] = Form(None),
+    prompt: Optional[str] = Form(None),
     response_format: str = Form("json"),
     temperature: float = Form(0.0),
     max_tokens: Optional[int] = Form(None),
     word_timestamps: bool = Form(False),
 ):
     """OpenAI-compatible audio transcription endpoint (Speech-to-Text).
+
+    ``prompt`` is forwarded to the underlying STT backend as a transcription-
+    biasing context (Whisper's ``initial_prompt``, Qwen2-Audio's ``prompt``,
+    etc.) — useful for steering domain vocabulary, proper nouns, product
+    names or stylistic preferences. Backends without any prompt-style kwarg
+    drop it silently.
 
     Note: ``response_format`` and ``temperature`` are accepted for OpenAI API
     compatibility but are not yet implemented — they are silently ignored.
@@ -453,6 +460,8 @@ async def create_transcription(
             transcribe_kwargs["max_tokens"] = effective_max_tokens
         if word_timestamps:
             transcribe_kwargs["word_timestamps"] = True
+        if prompt:
+            transcribe_kwargs["prompt"] = prompt
         result = await engine.transcribe(tmp_path, **transcribe_kwargs)
     except HTTPException:
         raise
