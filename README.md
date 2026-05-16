@@ -34,17 +34,27 @@ Flyto MLX 是面向**中国 Mac 用户**与**国产模型生态**优化的 Apple
 
 ## 安装
 
-```bash
-# pip
-pip install flyto-mlx
+**推荐：Homebrew tap**（macOS 最自然的方式，跟上游 oMLX 同模式）
 
-# 启动 server（CLI 兼容上游 omlx，主名为 fmlx）
-fmlx serve --port 8000
-# 或
-omlx serve --port 8000     # alias，与上游兼容
+```bash
+brew tap panwudi/flyto-mlx https://github.com/panwudi/flyto-mlx
+brew install flyto-mlx
+brew services start flyto-mlx     # launchd 自动起 server :8000
+
+# CLI 试用
+fmlx serve --port 8000             # 主名
+omlx serve --port 8000             # 兼容上游 oMLX 脚本的 alias
 ```
 
-DMG / brew tap 后续随 release 提供。
+**备用：pip 从 git 装**（Linux / 已有 Python 环境 / 想 editable 开发）
+
+```bash
+pip install git+https://github.com/panwudi/flyto-mlx@v0.4.1
+# 国内访问慢的话用 Gitee 镜像（开通后）：
+# pip install git+https://gitee.com/panwudi/flyto-mlx@v0.4.1
+```
+
+PyPI `pip install flyto-mlx` 暂不可用 — Flyto MLX 跟上游 oMLX 一样依赖几个未 release 到 PyPI 的 mlx-vlm commits（speculative utils refactor 等），PEP 508 禁止 PyPI package 含 git URL 依赖。等 mlx-vlm 0.6.x release 含相关 commits 后会启用 PyPI 通道。
 
 ## 快速试 audio chat
 
