@@ -41,6 +41,7 @@ from ..cache.vision_feature_cache import VisionFeatureSSDCache
 from ..models.vlm import VLMModelAdapter
 from ..patches.gated_delta_advance import apply_gated_delta_advance_patch
 from ..patches.qwen3_5_attention import apply_qwen3_5_attention_patch
+from ..utils.audio import extract_audios_from_messages
 from ..utils.image import (
     compute_image_hash,
     compute_per_image_hashes,
@@ -869,8 +870,9 @@ class VLMBatchedEngine(BaseEngine):
         self,
         messages: list[dict[str, Any]],
         num_images: int,
+        num_audios: int = 0,
     ) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
-        """Format VLM messages with image tokens on image-bearing user turns."""
+        """Format VLM messages with image / audio tokens on multimodal user turns."""
         from mlx_vlm.prompt_utils import extract_text_from_content, get_message_json
 
         model_type = self.model_type or getattr(self._vlm_model.config, "model_type", "")
@@ -878,14 +880,22 @@ class VLMBatchedEngine(BaseEngine):
             raise ValueError("Missing VLM model_type for chat template formatting")
 
         image_part_types = {"image", "image_url", "input_image"}
+        audio_part_types = {"input_audio", "audio"}
         has_explicit_images = any(
             isinstance(msg, dict)
             and self._count_content_parts(msg.get("content"), image_part_types) > 0
             for msg in messages
         )
+        has_explicit_audios = any(
+            isinstance(msg, dict)
+            and self._count_content_parts(msg.get("content"), audio_part_types) > 0
+            for msg in messages
+        )
 
         remaining_images = num_images
+        remaining_audios = num_audios
         assigned_fallback_images = False
+        assigned_fallback_audios = False
         formatted_messages: list[dict[str, Any]] = []
         image_message_ranges: list[tuple[int, int]] = []
 
@@ -898,6 +908,7 @@ class VLMBatchedEngine(BaseEngine):
             content = extract_text_from_content(raw_content)
 
             msg_num_images = 0
+            msg_num_audios = 0
             if role == "user":
                 explicit_images = self._count_content_parts(raw_content, image_part_types)
                 if explicit_images > 0 and remaining_images > 0:
@@ -911,6 +922,19 @@ class VLMBatchedEngine(BaseEngine):
                     msg_num_images = remaining_images
                     remaining_images = 0
                     assigned_fallback_images = True
+
+                explicit_audios = self._count_content_parts(raw_content, audio_part_types)
+                if explicit_audios > 0 and remaining_audios > 0:
+                    msg_num_audios = min(explicit_audios, remaining_audios)
+                    remaining_audios -= msg_num_audios
+                elif (
+                    not has_explicit_audios
+                    and remaining_audios > 0
+                    and not assigned_fallback_audios
+                ):
+                    msg_num_audios = remaining_audios
+                    remaining_audios = 0
+                    assigned_fallback_audios = True
 
             if msg_num_images > 0:
                 image_message_ranges.append((idx, msg_num_images))
@@ -936,9 +960,9 @@ class VLMBatchedEngine(BaseEngine):
                     content,
                     role,
                     skip_image_token=role != "user" or msg_num_images == 0,
-                    skip_audio_token=True,
+                    skip_audio_token=role != "user" or msg_num_audios == 0,
                     num_images=msg_num_images,
-                    num_audios=0,
+                    num_audios=msg_num_audios,
                 )
                 # Collapse text-only list content to plain string so that
                 # simplified chat templates (without render_content macro)
@@ -1071,6 +1095,7 @@ class VLMBatchedEngine(BaseEngine):
         self,
         messages: list[dict[str, Any]],
         images: list[Any],
+        audios: list[bytes] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         tools: list[dict] | None = None,
     ) -> Tuple[
@@ -1113,6 +1138,7 @@ class VLMBatchedEngine(BaseEngine):
         from mlx_vlm.utils import prepare_inputs
 
         num_images = len(images)
+        num_audios = len(audios) if audios else 0
         model_type = self.model_type or ""
 
         # Validate multi-image support
@@ -1122,12 +1148,12 @@ class VLMBatchedEngine(BaseEngine):
                 f"Please use only 1 image."
             )
 
-        # Apply VLM-specific chat template with image placeholders.
-        # Build per-message placeholders in oMLX so image-bearing turns always
-        # receive image tokens, regardless of conversation history shape.
+        # Apply VLM-specific chat template with image / audio placeholders.
+        # Build per-message placeholders in oMLX so multimodal-bearing turns
+        # always receive the right token(s), regardless of conversation history shape.
         try:
             formatted_messages, image_message_ranges = self._format_messages_for_vlm_template(
-                messages, num_images=num_images
+                messages, num_images=num_images, num_audios=num_audios,
             )
         except Exception as e:
             logger.debug(
@@ -1140,6 +1166,7 @@ class VLMBatchedEngine(BaseEngine):
                 self._vlm_model.config,
                 messages,
                 num_images=num_images,
+                num_audios=num_audios,
                 return_messages=True,
             )
             image_message_ranges = []
@@ -1205,12 +1232,34 @@ class VLMBatchedEngine(BaseEngine):
             else:
                 raise
 
-        # Tokenize text and preprocess images
-        inputs = prepare_inputs(
-            self._processor,
-            images=images if images else None,
-            prompts=[prompt] if isinstance(prompt, str) else prompt,
-        )
+        # Tokenize text and preprocess images / audio.
+        # HF processors (e.g. Gemma4Processor) accept file paths for `audio=`;
+        # spool incoming bytes to NamedTemporaryFiles for the duration of prepare_inputs.
+        audio_tmp_paths: list[str] = []
+        try:
+            if audios:
+                import os as _os
+                import tempfile as _tempfile
+                for ab in audios:
+                    tf = _tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                    try:
+                        tf.write(ab)
+                    finally:
+                        tf.close()
+                    audio_tmp_paths.append(tf.name)
+            inputs = prepare_inputs(
+                self._processor,
+                images=images if images else None,
+                audio=audio_tmp_paths if audio_tmp_paths else None,
+                prompts=[prompt] if isinstance(prompt, str) else prompt,
+            )
+        finally:
+            for _p in audio_tmp_paths:
+                try:
+                    import os as _os
+                    _os.unlink(_p)
+                except OSError:
+                    pass
 
         input_ids = inputs["input_ids"]
         pixel_values = inputs.get("pixel_values")
@@ -1283,15 +1332,22 @@ class VLMBatchedEngine(BaseEngine):
             and v is not None
         }
 
-        if pixel_values is not None and num_images > 0:
-            # Compute whole-request image hash (used for KV prefix cache keying)
-            image_hash = compute_image_hash(images)
+        has_vision = pixel_values is not None and num_images > 0
+        has_audio_payload = num_audios > 0 and (
+            inputs.get("input_features") is not None
+            or inputs.get("audio_features") is not None
+        )
+        if has_vision or has_audio_payload:
+            # Compute whole-request image hash (used for KV prefix cache keying).
+            # Audio-only requests skip the image hash; the prompt cache key will
+            # be derived from token IDs alone (audio embeddings ride in extra_kwargs).
+            image_hash = compute_image_hash(images) if has_vision else None
 
             # Build call kwargs from extra_model_inputs
             call_kwargs = dict(extra_model_inputs)
 
             # Try per-image vision feature cache
-            if self._vision_cache is not None and self._vision_cache_enabled:
+            if has_vision and self._vision_cache is not None and self._vision_cache_enabled:
                 per_hashes = compute_per_image_hashes(images)
                 cached_per_image = [
                     self._vision_cache.get(h, self._model_name) for h in per_hashes
@@ -1785,8 +1841,11 @@ class VLMBatchedEngine(BaseEngine):
         Returns:
             Tuple of (prompt_or_token_ids, vlm_embeds, vlm_kwargs, image_hash)
         """
-        # Extract images from messages
-        text_messages, images = extract_images_from_messages(messages)
+        # Extract audio parts first (preserves non-text non-audio parts so
+        # extract_images can still find image_url entries afterwards).
+        audio_stripped_messages, audios = extract_audios_from_messages(messages)
+        # Then extract images from the audio-stripped messages.
+        text_messages, images = extract_images_from_messages(audio_stripped_messages)
 
         ct_kwargs = kwargs.pop("chat_template_kwargs", None)
 
@@ -1798,14 +1857,15 @@ class VLMBatchedEngine(BaseEngine):
         token_ids, vlm_embeds, vlm_kwargs, image_hash, image_cache_key_start, image_cache_key_ranges = self._prepare_vision_inputs(
             vlm_messages,
             images,
+            audios=audios if audios else None,
             chat_template_kwargs=ct_kwargs,
             tools=template_tools,
         )
 
-        if images:
-            # Free Metal intermediates from vision encoding.
-            # Vision tower + projector produce large intermediate buffers
-            # that stay in the Metal cache pool until explicitly cleared.
+        if images or audios:
+            # Free Metal intermediates from vision / audio encoding.
+            # Vision tower + audio tower + projectors produce large intermediate
+            # buffers that stay in the Metal cache pool until explicitly cleared.
             # Without this, repeated VLM requests accumulate memory and
             # eventually trigger ProcessMemoryEnforcer aborts (see #667).
             mx.synchronize()
@@ -1833,8 +1893,10 @@ class VLMBatchedEngine(BaseEngine):
         Image tokens are added during vision encoding and vary by model.
         """
         # Extract text-only version for token counting
+        from ..utils.audio import extract_audios_from_messages as _xa
         from ..utils.image import extract_images_from_messages
-        text_messages, _ = extract_images_from_messages(messages)
+        audio_stripped, _ = _xa(messages)
+        text_messages, _ = extract_images_from_messages(audio_stripped)
 
         template_tools = convert_tools_for_template(tools) if tools else None
         prompt = self._apply_chat_template(

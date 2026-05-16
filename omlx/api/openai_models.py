@@ -33,6 +33,15 @@ class ImageURL(BaseModel):
     detail: Optional[str] = "auto"  # "low", "high", "auto"
 
 
+class InputAudio(BaseModel):
+    """Audio payload for VLMs with an audio modality (e.g. Gemma 4 nano)."""
+    # OpenAI native shape: {"data": "<base64>", "format": "wav"}
+    data: Optional[str] = None
+    format: Optional[str] = "wav"
+    # Convenience shape: file path / http URL / data URI.
+    url: Optional[str] = None
+
+
 class ContentPart(BaseModel):
     """
     A part of a message content array.
@@ -40,10 +49,16 @@ class ContentPart(BaseModel):
     Supports:
     - text: Plain text content
     - image_url: Image input for vision models
+    - input_audio: Audio input for audio-LLMs (OpenAI realtime / audio chat)
     """
-    type: str  # "text" or "image_url"
+    type: str  # "text" | "image_url" | "input_image" | "input_audio" | "audio"
     text: Optional[str] = None
     image_url: Optional[ImageURL] = None
+    input_audio: Optional[InputAudio] = None
+    # Anthropic-style audio shape: {"type":"audio","source":{...}}.
+    source: Optional[Dict[str, Any]] = None
+    # Alternative key some clients send for audio content.
+    audio: Optional[InputAudio] = None
 
 
 # =============================================================================

@@ -175,6 +175,44 @@ def _extract_multimodal_content_list(content: list) -> list:
                             },
                         }
                     )
+            elif item_type in ("input_audio", "audio"):
+                # OpenAI format: {"type":"input_audio","input_audio":{"data":<b64>,"format":"wav"}}
+                # Anthropic-style alt:  {"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":<b64>}}
+                # Data-URI alt:         {"type":"input_audio","input_audio":{"url":"data:audio/wav;base64,..."}}
+                # Also accept plain file URL/path in input_audio.url for symmetry with image_url.
+                payload = item.get("input_audio") if item_type == "input_audio" else item.get("audio")
+                url = None
+                data_b64 = None
+                fmt = "wav"
+                if isinstance(payload, dict):
+                    if payload.get("url"):
+                        url = payload["url"]
+                    if payload.get("data"):
+                        data_b64 = payload["data"]
+                    if payload.get("format"):
+                        fmt = payload["format"]
+                elif isinstance(payload, str):
+                    url = payload
+                if data_b64 is None and url is None:
+                    src = item.get("source", {})
+                    if isinstance(src, dict) and src.get("type") == "base64":
+                        data_b64 = src.get("data")
+                        media_type = src.get("media_type", "audio/wav")
+                        fmt = media_type.split("/", 1)[1] if "/" in media_type else fmt
+                if data_b64 is not None:
+                    parts.append(
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": data_b64, "format": fmt},
+                        }
+                    )
+                elif url:
+                    parts.append(
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"url": url, "format": fmt},
+                        }
+                    )
     return parts
 
 
@@ -649,10 +687,13 @@ def extract_multimodal_content(
         if isinstance(content, str):
             processed_messages.append({"role": role, "content": content, **_extra})
         elif isinstance(content, list):
-            # Preserve image_url parts for VLM processing
+            # Preserve image_url / input_audio parts for VLM processing.
             multimodal_parts = _extract_multimodal_content_list(content)
-            has_images = any(p.get("type") == "image_url" for p in multimodal_parts)
-            if has_images:
+            has_multimodal = any(
+                p.get("type") in ("image_url", "input_audio")
+                for p in multimodal_parts
+            )
+            if has_multimodal:
                 # Keep as content list for VLM engine
                 processed_messages.append(
                     {"role": role, "content": multimodal_parts, **_extra}
