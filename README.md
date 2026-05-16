@@ -1,377 +1,103 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/images/icon-rounded-dark.svg" width="140">
-    <source media="(prefers-color-scheme: light)" srcset="docs/images/icon-rounded-light.svg" width="140">
-    <img alt="oMLX" src="docs/images/icon-rounded-light.svg" width="140">
-  </picture>
+  <img alt="Flyto MLX" src="docs/images/icon-rounded-light.svg" width="140">
 </p>
 
-<h1 align="center">oMLX</h1>
-<p align="center"><b>LLM inference, optimized for your Mac</b><br>Continuous batching and tiered KV caching, managed directly from your menu bar.</p>
-
+<h1 align="center">Flyto MLX</h1>
 <p align="center">
-<a href="https://www.buymeacoffee.com/jundot"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40"></a>
+  <b>Apple Silicon LLM 服务器 · Audio chat · DFlash 双引擎 · 中文模型预设</b><br>
+  Based on <a href="https://github.com/jundot/omlx">oMLX</a> by <a href="https://github.com/jundot">@jundot</a>.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
   <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
-</p>
-
-<p align="center">
-  <a href="mailto:junkim.dot@gmail.com">junkim.dot@gmail.com</a> · <a href="https://omlx.ai/me">https://omlx.ai/me</a>
-</p>
-
-<p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#models">Models</a> ·
-  <a href="#cli-configuration">CLI Configuration</a> ·
-  <a href="https://omlx.ai/benchmarks">Benchmarks</a> ·
-  <a href="https://omlx.ai">oMLX.ai</a>
-</p>
-
-<p align="center">
-  <b>English</b> ·
-  <a href="README.zh.md">中文</a> ·
-  <a href="README.ko.md">한국어</a> ·
-  <a href="README.ja.md">日本語</a>
+  <a href="https://gitee.com/panwudi/flyto-mlx"><img src="https://img.shields.io/badge/Gitee-mirror-c71d23" alt="Gitee mirror"></a>
 </p>
 
 ---
 
-<p align="center">
-  <img src="docs/images/omlx_dashboard.png" alt="oMLX Admin Dashboard" width="800">
-</p>
+**中文** | [English](#english)
 
-> *Every LLM server I tried made me choose between convenience and control. I wanted to pin everyday models in memory, auto-swap heavier ones on demand, set context limits - and manage it all from a menu bar.*
->
-> *oMLX persists KV cache across a hot in-memory tier and cold SSD tier - even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
+## 简介
 
-## Install
+Flyto MLX 是面向**中国 Mac 用户**与**国产模型生态**优化的 Apple Silicon 本地 LLM 服务器，基于 [@jundot/oMLX](https://github.com/jundot/omlx) fork。在保留 oMLX 全部上游能力（OpenAI 兼容 API、多模型 LRU 调度、KV 分页缓存、Mac menubar GUI）的基础上，加入了上游尚未合并/未支持的功能：
 
-### macOS App
-
-Download the `.dmg` from [Releases](https://github.com/jundot/omlx/releases), drag to Applications, done. The app includes in-app auto-update, so future upgrades are just one click. Note that the macOS app does not install the `omlx` CLI command. For terminal usage, install via Homebrew or from source.
-
-### Homebrew
-
-```bash
-brew tap jundot/omlx https://github.com/jundot/omlx
-brew install omlx
-
-# Upgrade to the latest version
-brew update && brew upgrade omlx
-
-# Run as a background service (auto-restarts on crash)
-brew services start omlx
-
-# Optional: MCP (Model Context Protocol) support
-/opt/homebrew/opt/omlx/libexec/bin/pip install mcp
-```
-
-### From Source
-
-```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e .          # Core only
-pip install -e ".[mcp]"   # With MCP (Model Context Protocol) support
-```
-
-Requires macOS 15.0+ (Sequoia), Python 3.10+, and Apple Silicon (M1/M2/M3/M4).
-
-## Quickstart
-
-### macOS App
-
-Launch oMLX from your Applications folder. The Welcome screen guides you through three steps - model directory, server start, and first model download. That's it. To connect OpenClaw, OpenCode, Codex, or Copilot, see [Integrations](#integrations).
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.36.32.png" alt="oMLX Welcome Screen" width="360">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.34.30.png" alt="oMLX Menubar" width="240">
-</p>
-
-### CLI
-
-```bash
-omlx serve --model-dir ~/models
-```
-
-The server discovers LLMs, VLMs, embedding models, and rerankers from subdirectories automatically. Any OpenAI-compatible client can connect to `http://localhost:8000/v1`. A built-in chat UI is also available at `http://localhost:8000/admin/chat`.
-
-### Homebrew Service
-
-If you installed via Homebrew, you can run oMLX as a managed background service:
-
-```bash
-brew services start omlx    # Start (auto-restarts on crash)
-brew services stop omlx     # Stop
-brew services restart omlx  # Restart
-brew services info omlx     # Check status
-```
-
-The service runs `omlx serve` with zero-config defaults (`~/.omlx/models`, port 8000). To customize, either set environment variables (`OMLX_MODEL_DIR`, `OMLX_PORT`, etc.) or run `omlx serve --model-dir /your/path` once to persist settings to `~/.omlx/settings.json`.
-
-Logs are written to two locations:
-- **Service log**: `$(brew --prefix)/var/log/omlx.log` (stdout/stderr)
-- **Server log**: `~/.omlx/logs/server.log` (structured application log)
-
-## Features
-
-Supports text LLMs, vision-language models (VLM), OCR models, embeddings, and rerankers on Apple Silicon.
-
-### Admin Dashboard
-
-Web UI at `/admin` for real-time monitoring, model management, chat, benchmark, and per-model settings. Supports English, Korean, Japanese, Chinese, French, and Russian. All CDN dependencies are vendored for fully offline operation.
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.45.34.png" alt="oMLX Admin Dashboard" width="720">
-</p>
-
-### Vision-Language Models
-
-Run VLMs with the same continuous batching and tiered KV cache stack as text LLMs. Supports multi-image chat, base64/URL/file image inputs, and tool calling with vision context. OCR models (DeepSeek-OCR, DOTS-OCR, GLM-OCR) are auto-detected with optimized prompts.
-
-### Tiered KV Cache (Hot + Cold)
-
-Block-based KV cache management inspired by vLLM, with prefix sharing and Copy-on-Write. The cache operates across two tiers:
-
-- **Hot tier (RAM)**: Frequently accessed blocks stay in memory for fast access.
-- **Cold tier (SSD)**: When the hot cache fills up, blocks are offloaded to SSD in safetensors format. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch - even after a server restart.
-
-<p align="center">
-  <img src="docs/images/omlx_hot_cold_cache.png" alt="oMLX Hot & Cold Cache" width="720">
-</p>
-
-### Continuous Batching
-
-Handles concurrent requests through mlx-lm's BatchGenerator. Max concurrent requests is configurable via CLI or admin panel.
-
-### Claude Code Optimization
-
-Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
-
-### Multi-Model Serving
-
-Load LLMs, VLMs, embedding models, and rerankers within the same server. Models are managed through a combination of automatic and manual controls:
-
-- **LRU eviction**: Least-recently-used models are evicted automatically when memory runs low.
-- **Manual load/unload**: Interactive status badges in the admin panel let you load or unload models on demand.
-- **Model pinning**: Pin frequently used models to keep them always loaded.
-- **Per-model TTL**: Set an idle timeout per model to auto-unload after a period of inactivity.
-- **Process memory enforcement**: Total memory limit (default: system RAM - 8GB) prevents system-wide OOM.
-
-### Per-Model Settings
-
-Configure sampling parameters, chat template kwargs, TTL, model alias, model type override, and more per model directly from the admin panel. Changes apply immediately without server restart.
-
-- **Model alias**: set a custom API-visible name. `/v1/models` returns the alias, and requests accept both the alias and directory name.
-- **Model type override**: manually set a model as LLM or VLM regardless of auto-detection.
-
-<p align="center">
-  <img src="docs/images/omlx_ChatTemplateKwargs.png" alt="oMLX Chat Template Kwargs" width="480">
-</p>
-
-### Built-in Chat
-
-Chat directly with any loaded model from the admin panel. Supports conversation history, model switching, dark mode, reasoning model output, and image upload for VLM/OCR models.
-
-<p align="center">
-  <img src="docs/images/ScreenShot_2026-03-14_104350_610.png" alt="oMLX Chat" width="720">
-</p>
-
-
-### Model Downloader
-
-Search and download MLX models from HuggingFace directly in the admin dashboard. Browse model cards, check file sizes, and download with one click.
-
-<p align="center">
-  <img src="docs/images/downloader_omlx.png" alt="oMLX Model Downloader" width="720">
-</p>
-
-### Integrations
-
-Set up OpenClaw, OpenCode, Codex, Copilot, and Pi directly from the admin dashboard with a single click. No manual config editing required.
-
-<p align="center">
-  <img src="docs/images/omlx_integrations.png" alt="oMLX Integrations" width="720">
-</p>
-
-### Performance Benchmark
-
-One-click benchmarking from the admin panel. Measures prefill (PP) and text generation (TG) tokens per second, with partial prefix cache hit testing for realistic performance numbers.
-
-<p align="center">
-  <img src="docs/images/benchmark_omlx.png" alt="oMLX Benchmark Tool" width="720">
-</p>
-
-### macOS Menubar App
-
-Native PyObjC menubar app (not Electron). Start, stop, and monitor the server without opening a terminal. Includes persistent serving stats (survives restarts), auto-restart on crash, and in-app auto-update.
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.51.54.png" alt="oMLX Menubar Stats" width="400">
-</p>
-
-### API Compatibility
-
-Drop-in replacement for OpenAI and Anthropic APIs. Supports streaming usage stats (`stream_options.include_usage`), Anthropic adaptive thinking, and vision inputs (base64, URL).
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | Chat completions (streaming) |
-| `POST /v1/completions` | Text completions (streaming) |
-| `POST /v1/messages` | Anthropic Messages API |
-| `POST /v1/embeddings` | Text embeddings |
-| `POST /v1/rerank` | Document reranking |
-| `GET /v1/models` | List available models |
-
-### Tool Calling & Structured Output
-
-Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration. Tool calling requires the model's chat template to support the `tools` parameter. The following model families are auto-detected via mlx-lm's built-in tool parsers:
-
-| Model Family | Format |
+| 能力 | 说明 |
 |---|---|
-| Llama, Qwen, DeepSeek, etc. | JSON `<tool_call>` |
-| Qwen3.5 Series | XML `<function=...>` |
-| Gemma | `<start_function_call>` |
-| GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
-| MiniMax | Namespaced `<minimax:tool_call>` |
-| Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
-| Longcat | `<longcat_tool_call>` |
+| **Gemma 4 audio chat** | OpenAI `input_audio` content type 端到端支持，调用 `gemma4-e2b` / `gemma4-e4b` 直接听音频回答（不是 ASR 替代，是端到端 audio understanding） |
+| **DFlash 双引擎 (Path A)** | Qwen / Gemma 4 双 backend，drafter co-loaded 优化 |
+| **Tahoe 兼容** | macOS 26 NSStatusItem occlusion bit 修复 |
+| **上游已修但未发版的 backport** | tokenizer lm_head、TokenBuffer cache hit seed、health-check Session 复用 等 5 处 |
+| **中文模型预设** | Qwen 3.5 MoE/Dense / DeepSeek V4 / Gemma 4 / 等 alias 即装即用 |
+| **Gitee 镜像 + ModelScope 模型源** | 国内 access 优化 |
 
-Models not listed above may still work if their chat template accepts `tools` and their output uses a recognized `<tool_call>` XML format. For tool-enabled streaming, assistant text is emitted incrementally while known tool-call control markup is suppressed from visible content; structured tool calls are emitted after parsing the completed turn.
-
-## Models
-
-Point `--model-dir` at a directory containing MLX-format model subdirectories. Two-level organization folders (e.g., `mlx-community/model-name/`) are also supported.
-
-```
-~/models/
-├── Step-3.5-Flash-8bit/
-├── Qwen3-Coder-Next-8bit/
-├── gpt-oss-120b-MXFP4-Q8/
-├── Qwen3.5-122B-A10B-4bit/
-└── bge-m3/
-```
-
-Models are auto-detected by type. You can also download models directly from the admin dashboard.
-
-| Type | Models |
-|------|--------|
-| LLM | Any model supported by [mlx-lm](https://github.com/ml-explore/mlx-lm) |
-| VLM | Qwen3.5 Series, GLM-4V, Pixtral, and other [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) models |
-| OCR | DeepSeek-OCR, DOTS-OCR, GLM-OCR |
-| Embedding | BERT, BGE-M3, ModernBERT |
-| Reranker | ModernBERT, XLM-RoBERTa |
-
-## CLI Configuration
+## 安装
 
 ```bash
-# Memory limit for loaded models
-omlx serve --model-dir ~/models --max-model-memory 32GB
+# pip
+pip install flyto-mlx
 
-# Process-level memory limit (default: auto = RAM - 8GB)
-omlx serve --model-dir ~/models --max-process-memory 80%
-
-# Enable SSD cache for KV blocks
-omlx serve --model-dir ~/models --paged-ssd-cache-dir ~/.omlx/cache
-
-# Set in-memory hot cache size
-omlx serve --model-dir ~/models --hot-cache-max-size 20%
-
-# Adjust max concurrent requests (default: 8)
-omlx serve --model-dir ~/models --max-concurrent-requests 16
-
-# With MCP tools
-omlx serve --model-dir ~/models --mcp-config mcp.json
-
-# HuggingFace mirror endpoint (for restricted regions)
-omlx serve --model-dir ~/models --hf-endpoint https://hf-mirror.com
-
-# API key authentication
-omlx serve --model-dir ~/models --api-key your-secret-key
-# Localhost-only: skip verification via admin panel global settings
+# 启动 server（CLI 兼容上游 omlx，主名为 fmlx）
+fmlx serve --port 8000
+# 或
+omlx serve --port 8000     # alias，与上游兼容
 ```
 
-All settings can also be configured from the web admin panel at `/admin`. Settings are persisted to `~/.omlx/settings.json`, and CLI flags take precedence.
+DMG / brew tap 后续随 release 提供。
 
-<details>
-<summary>Architecture</summary>
-
-```
-FastAPI Server (OpenAI / Anthropic API)
-    │
-    ├── EnginePool (multi-model, LRU eviction, TTL, manual load/unload)
-    │   ├── BatchedEngine (LLMs, continuous batching)
-    │   ├── VLMEngine (vision-language models)
-    │   ├── EmbeddingEngine
-    │   └── RerankerEngine
-    │
-    ├── ProcessMemoryEnforcer (total memory limit, TTL checks)
-    │
-    ├── Scheduler (FCFS, configurable concurrency)
-    │   └── mlx-lm BatchGenerator
-    │
-    └── Cache Stack
-        ├── PagedCacheManager (GPU, block-based, CoW, prefix sharing)
-        ├── Hot Cache (in-memory tier, write-back)
-        └── PagedSSDCacheManager (SSD cold tier, safetensors format)
-```
-
-</details>
-
-## Development
-
-### CLI Server
+## 快速试 audio chat
 
 ```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e ".[dev]"
-pytest -m "not slow"
+# 假设 server 已起在 :8000，API key 设为 mykey
+python3 <<'PY'
+import base64, requests, json
+with open("recording.wav","rb") as f:
+    b64 = base64.b64encode(f.read()).decode()
+r = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    headers={"Authorization": "Bearer mykey"},
+    json={
+        "model": "gemma4-e2b",
+        "max_tokens": 400,
+        "temperature": 0.3,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "总结这段电话的关键信息"},
+            {"type": "input_audio", "input_audio": {"data": b64, "format": "wav"}}
+        ]}]
+    },
+)
+print(r.json()["choices"][0]["message"]["content"])
+PY
 ```
 
-### macOS App
+## 跟上游 oMLX 的关系
 
-Requires Python 3.11+ and [venvstacks](https://venvstacks.lmstudio.ai) (`pip install venvstacks`).
+Flyto MLX 是 oMLX 的下游 fork，遵循 Apache 2.0。我们**定期 cherry-pick 上游 bug fix 与新模型支持**，但不再向上游 PR 自家 feature（audio chat、DFlash 等）。如果你只想要纯上游体验，请用 [@jundot/oMLX](https://github.com/jundot/omlx)。
 
-```bash
-cd packaging
-
-# Full build (venvstacks + app bundle + DMG)
-python build.py
-
-# Skip venvstacks (code changes only)
-python build.py --skip-venv
-
-# DMG only
-python build.py --dmg-only
-```
-
-See [packaging/README.md](packaging/README.md) for details on the app bundle structure and layer configuration.
-
-## Contributing
-
-Contributions are welcome! See [Contributing Guide](docs/CONTRIBUTING.md) for details.
-
-- Bug fixes and improvements
-- Performance optimizations
-- Documentation improvements
+详细 attribution 与版权声明见 [NOTICE](NOTICE) 与 [LICENSE](LICENSE)。
 
 ## License
 
-[Apache 2.0](LICENSE)
+Apache License 2.0. Based on oMLX by [@jundot](https://github.com/jundot). 详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
-## Acknowledgments
+---
 
-- [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple
-- [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) - Vision-language model inference on Apple Silicon
-- [vllm-mlx](https://github.com/waybarrios/vllm-mlx) - oMLX started from vllm-mlx v0.1.0 and evolved significantly with multi-model serving, tiered KV caching, VLM with full paged cache support, an admin panel, and a macOS menu bar app
-- [venvstacks](https://venvstacks.lmstudio.ai) - Portable Python environment layering for the macOS app bundle
-- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) - Embedding model support for Apple Silicon
-- [dflash-mlx](https://github.com/bstnxbt/dflash-mlx) - Block diffusion speculative decoding on Apple Silicon
+## English
+
+Flyto MLX is a fork of [@jundot/oMLX](https://github.com/jundot/omlx) optimized for the Chinese Mac LLM community and sovereign-AI model ecosystem (Qwen, DeepSeek, Gemma 4). It preserves all upstream oMLX capabilities (OpenAI-compatible API, multi-model LRU scheduling, KV paged cache, menubar GUI) and adds:
+
+- **Audio chat via OpenAI `input_audio`** — end-to-end Gemma 4 nano audio LLM through `/v1/chat/completions`
+- **DFlash Path A double-engine** — Qwen and Gemma 4 backends with optimized drafter co-loading
+- **macOS 26 Tahoe compatibility** — NSStatusItem occlusion bit fix
+- **5 upstream-fixed-but-unreleased patches backported** — tokenizer lm_head, TokenBuffer cache hit seed, health-check session reuse, and more
+- **Chinese model presets** — Qwen 3.5 MoE/Dense, DeepSeek V4, Gemma 4 aliases ready out of the box
+- **Gitee mirror + ModelScope model registry** — for users in mainland China
+
+Install: `pip install flyto-mlx`. CLI: `fmlx serve` (or `omlx serve` alias for upstream compatibility).
+
+We periodically cherry-pick upstream fixes. We do **not** upstream our own features back. For pure upstream behaviour, please use [@jundot/oMLX](https://github.com/jundot/omlx) directly.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

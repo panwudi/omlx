@@ -3,16 +3,18 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "omlx"
+name = "flyto-mlx"
 dynamic = ["version"]
-description = "LLM inference server, optimized for your Mac"
+description = "Flyto MLX — Apple Silicon LLM server with audio chat, DFlash, and Chinese model presets (based on oMLX)"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
-    {name = "omlx contributors"}
+    {name = "panwudi"},
+    {name = "Flyto MLX contributors"},
+    {name = "oMLX contributors (upstream)"}
 ]
-keywords = ["llm", "mlx", "apple-silicon", "vllm", "inference", "transformers"]
+keywords = ["llm", "mlx", "apple-silicon", "vllm", "inference", "transformers", "audio-llm", "gemma", "qwen", "deepseek"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -126,11 +128,17 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jundot/omlx"
-Documentation = "https://github.com/jundot/omlx#readme"
-Repository = "https://github.com/jundot/omlx"
+Homepage = "https://github.com/panwudi/flyto-mlx"
+Documentation = "https://github.com/panwudi/flyto-mlx#readme"
+Repository = "https://github.com/panwudi/flyto-mlx"
+"Gitee Mirror" = "https://gitee.com/panwudi/flyto-mlx"
+Upstream = "https://github.com/jundot/omlx"
 
 [project.scripts]
+# Primary CLI under the Flyto MLX brand.
+fmlx = "omlx.cli:main"
+# Backward-compatible alias so existing scripts that call `omlx serve ...`
+# keep working after upgrading from upstream oMLX or earlier Flyto MLX builds.
 omlx = "omlx.cli:main"
 
 [tool.setuptools.dynamic]

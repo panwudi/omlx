@@ -1,0 +1,37 @@
+Flyto MLX
+Copyright 2026 panwudi and Flyto MLX contributors
+
+This product is a derivative work of oMLX:
+  https://github.com/jundot/omlx
+  Copyright (c) jundot and the oMLX contributors
+  Licensed under the Apache License, Version 2.0
+
+oMLX itself adapts code from vllm-mlx, mlx-lm, mlx-vlm, and mlx-audio,
+each of which retains its own copyright and license. See LICENSE for
+the full text of the Apache 2.0 license that governs this work.
+
+Substantive additions on top of upstream oMLX as of this release:
+
+  * /v1/chat/completions support for OpenAI input_audio content parts,
+    wiring Gemma 4 nano (E2B / E4B) audio tower end-to-end through the
+    chat endpoint.
+
+  * DFlash Path A double-engine implementation, generalised across Qwen
+    and Gemma 4 backends with optimised drafter co-loading.
+
+  * macOS 26 (Tahoe) NSStatusItem occlusion-bit fix for the menubar GUI
+    bundle.
+
+  * Backports of five upstream-fixed-but-not-yet-released bug fixes:
+    lm_head tokenizer vocab_size source, TokenBuffer seeding on cached
+    prompt hits, health-check Session reuse, and others.
+
+  * Chinese model aliases / presets for Qwen 3.5, DeepSeek V4, Gemma 4
+    families.
+
+  * Gitee mirror and ModelScope model registry support for users in
+    mainland China.
+
+For attribution requirements under Apache 2.0 §4, redistributors must
+retain this NOTICE file along with the LICENSE file in any distribution
+of Flyto MLX or any derivative thereof.
