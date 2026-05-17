@@ -17,7 +17,7 @@ import tempfile
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
 
 from ..engine.audio_utils import wav_bytes_to_pcm_frames, wav_header
 from ..server_metrics import get_server_metrics
@@ -369,7 +369,7 @@ async def _stream_with_prefetched_chunk(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/v1/audio/transcriptions", response_model=AudioTranscriptionResponse)
+@router.post("/v1/audio/transcriptions")
 async def create_transcription(
     file: UploadFile = File(...),
     model: str = Form(...),
@@ -378,8 +378,14 @@ async def create_transcription(
     text: Optional[str] = Form(None),
     response_format: str = Form("json"),
     temperature: float = Form(0.0),
+    top_p: Optional[float] = Form(None),
+    top_k: Optional[int] = Form(None),
+    min_p: Optional[float] = Form(None),
+    repetition_penalty: Optional[float] = Form(None),
+    repetition_context_size: Optional[int] = Form(None),
     max_tokens: Optional[int] = Form(None),
     word_timestamps: bool = Form(False),
+    n: int = Form(1),
 ):
     """OpenAI-compatible audio transcription endpoint (Speech-to-Text).
 
@@ -404,20 +410,50 @@ async def create_transcription(
     ``segments[0].words``. Default False preserves the existing response
     shape for every current caller.
 
-    ``temperature`` > 0 is forwarded to the backend's sampler (Qwen3-ASR,
-    Qwen2-Audio, Whisper all accept it). Useful for breaking decoder
-    degenerate loops on silent/repetitive audio. temperature=0 (default)
-    means greedy and is the no-op default for every backend, so we skip
-    forwarding it.
+    ``temperature``, ``top_p``, ``top_k``, ``min_p``, ``repetition_penalty``,
+    ``repetition_context_size`` are forwarded to the backend's sampler when
+    non-default. Useful for breaking decoder degenerate loops on long
+    silent/repetitive audio — e.g. Qwen3-ASR on mono channels can emit
+    hundreds of repeated tokens; ``repetition_penalty=1.2`` with
+    ``repetition_context_size=64`` is a typical fix. Qwen3-ASR and
+    Qwen2-Audio accept all of these natively; Whisper has ``**decode_options``
+    so unknown kwargs are silently ignored.
 
-    Note: ``response_format`` is accepted for OpenAI API compatibility but
-    is not yet implemented — it is silently ignored.
+    ``response_format`` supports ``json`` (default), ``verbose_json``,
+    and ``text``. ``srt`` / ``vtt`` are not yet implemented (return 501).
+
+    ``n`` must be 1. Multi-candidate transcription is rejected with 400.
 
     ``max_tokens`` is an oMLX extension that raises the underlying model's
     output cap. Useful for long audio with models like VibeVoice-ASR whose
     mlx-audio default (8192) truncates ~24 min files. When omitted, the
     model's own default applies.
     """
+    if n != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="n must be 1; multi-candidate transcription is not supported.",
+        )
+    response_format = (response_format or "json").lower().strip()
+    if response_format in ("srt", "vtt"):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"response_format='{response_format}' is not yet implemented. "
+                "Use 'json' (default), 'verbose_json', or 'text'. For "
+                "word-level timestamps, request 'verbose_json' with "
+                "word_timestamps=true; SRT/VTT formatting can be done "
+                "client-side from the returned segments[].words."
+            ),
+        )
+    if response_format not in ("json", "verbose_json", "text"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown response_format='{response_format}'. "
+                "Supported: json, verbose_json, text."
+            ),
+        )
     from omlx.engine.stt import STTEngine
     from omlx.exceptions import ModelNotFoundError
 
@@ -485,6 +521,20 @@ async def create_transcription(
         # on silent/quasi-silent mono input emits hundreds of repeated "嗯").
         if temperature is not None and temperature > 0:
             transcribe_kwargs["temperature"] = temperature
+        # Sampling tail (Qwen3-ASR / Qwen2-Audio accept all of these natively;
+        # Whisper has **decode_options so unknown kwargs are silently dropped).
+        # repetition_penalty + repetition_context_size is the typical fix for
+        # mono-channel long-silence degeneration on Qwen3-ASR.
+        if top_p is not None:
+            transcribe_kwargs["top_p"] = top_p
+        if top_k is not None:
+            transcribe_kwargs["top_k"] = top_k
+        if min_p is not None:
+            transcribe_kwargs["min_p"] = min_p
+        if repetition_penalty is not None:
+            transcribe_kwargs["repetition_penalty"] = repetition_penalty
+        if repetition_context_size is not None:
+            transcribe_kwargs["repetition_context_size"] = repetition_context_size
         if text is not None:
             transcribe_kwargs["text"] = text
 
@@ -580,7 +630,18 @@ async def create_transcription(
 
     _record_audio_request(resolved_model)
 
-    # Build response directly from the dict returned by STTEngine
+    # response_format=text: OpenAI spec returns just the transcript body as
+    # text/plain with no envelope, segments, or metadata.
+    if response_format == "text":
+        return PlainTextResponse(
+            content=result.get("text", ""),
+            media_type="text/plain; charset=utf-8",
+        )
+
+    # json (default) and verbose_json both return the same shape today —
+    # OpenAI's verbose_json is a superset of json with segments/duration,
+    # and we always include those when the backend exposes them. Clients
+    # asking for plain json simply ignore the extra fields.
     segments = result.get("segments") or None
 
     return AudioTranscriptionResponse(

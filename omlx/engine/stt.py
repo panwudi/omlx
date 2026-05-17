@@ -324,6 +324,28 @@ class STTEngine(BaseNonStreamingEngine):
             if text is not None:
                 gen_kwargs["text"] = text
 
+            # Defensive filter: if the backend's generate() signature does
+            # not have **kwargs, drop any gen_kwargs whose name isn't an
+            # explicit parameter. Qwen3-ASR / Qwen2-Audio / Whisper all
+            # have **kwargs (or **decode_options) so this is a no-op for
+            # them, but the audio_routes layer now forwards top_p/top_k/
+            # min_p/repetition_penalty for sampler tuning — backends like
+            # Parakeet that have a strict keyword-only signature would
+            # raise TypeError otherwise.
+            try:
+                import inspect as _inspect
+                _params = _inspect.signature(model.generate).parameters
+                _has_var_kwargs = any(
+                    p.kind == _inspect.Parameter.VAR_KEYWORD
+                    for p in _params.values()
+                )
+                if not _has_var_kwargs:
+                    gen_kwargs = {
+                        k: v for k, v in gen_kwargs.items() if k in _params
+                    }
+            except (TypeError, ValueError):
+                pass
+
             result = model.generate(audio_path, **gen_kwargs)
 
             # Two shapes possible:
