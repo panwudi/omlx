@@ -711,5 +711,8 @@
   "modal.model_settings.dflash_l2_cache": "SSD 缓存",
   "modal.model_settings.dflash_l2_cache_hint": "L1 淘汰条目 spill 到磁盘的 L2 缓存。使用 oMLX paged SSD cache 目录（<code>dflash_l2/</code>）。",
   "modal.model_settings.dflash_l2_unavailable": "请先启用 oMLX paged SSD cache（<code>--paged-ssd-cache-dir</code>）。",
-  "modal.model_settings.dflash_l2_requires_l1": "需要先启用内存缓存。"
+  "modal.model_settings.dflash_l2_requires_l1": "需要先启用内存缓存。",
+  "modal.model_settings.aligner_model": "強制對齊器",
+  "modal.model_settings.aligner_model_hint": "僅 STT 模型有效。設定後，對該模型呼叫 <code class=\"text-xs bg-neutral-100 px-1 rounded\">/v1/audio/transcriptions</code> 並帶 <code class=\"text-xs bg-neutral-100 px-1 rounded\">word_timestamps=true</code>，server 會自動 chain 這個 aligner，在 <code class=\"text-xs bg-neutral-100 px-1 rounded\">segments[0].words</code> 裡輸出每字／詞時間戳。Qwen3-ASR 系列必須靠它才能拿到 word timestamps（mlx-audio Qwen3-ASR 自己不返）。",
+  "modal.model_settings.aligner_model_placeholder": "不設 aligner（預設）"
 }

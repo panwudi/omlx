@@ -688,5 +688,8 @@
   "js.error.delete_model_failed": "Error al eliminar el modelo",
   "js.error.delete_model_connection": "Error al eliminar el modelo. Verifica la conexión con el servidor.",
   "js.success.download_started": "Descarga iniciada: {repo_id}",
-  "js.success.settings_saved": "Configuración guardada correctamente"
+  "js.success.settings_saved": "Configuración guardada correctamente",
+  "modal.model_settings.aligner_model": "Forced Aligner",
+  "modal.model_settings.aligner_model_hint": "STT models only. When set, calling <code class=\"text-xs bg-neutral-100 px-1 rounded\">/v1/audio/transcriptions</code> on this model with <code class=\"text-xs bg-neutral-100 px-1 rounded\">word_timestamps=true</code> auto-chains the configured aligner and returns per-word/char timestamps in <code class=\"text-xs bg-neutral-100 px-1 rounded\">segments[0].words</code>. Required for Qwen3-ASR family — mlx-audio Qwen3-ASR does not produce word timestamps on its own.",
+  "modal.model_settings.aligner_model_placeholder": "No aligner (default)"
 }

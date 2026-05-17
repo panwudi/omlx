@@ -713,5 +713,8 @@
   "modal.model_settings.dflash_l2_cache": "SSD cache",
   "modal.model_settings.dflash_l2_cache_hint": "L2 spill of evicted L1 entries to disk. Uses the oMLX paged SSD cache directory (<code>dflash_l2/</code>).",
   "modal.model_settings.dflash_l2_unavailable": "Enable oMLX paged SSD cache first (<code>--paged-ssd-cache-dir</code>).",
-  "modal.model_settings.dflash_l2_requires_l1": "Requires in-memory cache to be enabled."
+  "modal.model_settings.dflash_l2_requires_l1": "Requires in-memory cache to be enabled.",
+  "modal.model_settings.aligner_model": "Forced Aligner",
+  "modal.model_settings.aligner_model_hint": "STT models only. When set, calling <code class=\"text-xs bg-neutral-100 px-1 rounded\">/v1/audio/transcriptions</code> on this model with <code class=\"text-xs bg-neutral-100 px-1 rounded\">word_timestamps=true</code> auto-chains the configured aligner and returns per-word/char timestamps in <code class=\"text-xs bg-neutral-100 px-1 rounded\">segments[0].words</code>. Required for Qwen3-ASR family — mlx-audio Qwen3-ASR does not produce word timestamps on its own.",
+  "modal.model_settings.aligner_model_placeholder": "No aligner (default)"
 }
