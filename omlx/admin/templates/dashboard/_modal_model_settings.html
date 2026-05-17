@@ -900,23 +900,24 @@
                                                class="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-black" />
                                     </div>
                                 </div>
-
-                                <!-- Forced Aligner companion (STT models only) -->
-                                <div class="p-4 bg-neutral-50 rounded-xl space-y-3 mt-3">
-                                    <div class="min-w-0">
-                                        <span class="text-sm font-medium text-neutral-700">Forced Aligner</span>
-                                        <p class="text-xs text-neutral-500 mt-0.5">仅 STT 模型有效。设置后，对该模型调 <code class="text-xs bg-neutral-100 px-1 rounded">/v1/audio/transcriptions</code> 带 <code class="text-xs bg-neutral-100 px-1 rounded">word_timestamps=true</code>，server 会自动 chain 这个 aligner，在 segments[0].words 里输出每字/词时间戳。Qwen3-ASR 系列必须靠它才能拿到 word timestamps（mlx-audio Qwen3-ASR 自己不返）。</p>
-                                    </div>
-                                    <select x-model="modelSettings.aligner_model"
-                                            class="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-black bg-white">
-                                        <option value="">不设 aligner（默认）</option>
-                                        <template x-for="m in models.filter(m => /aligner/i.test(m.id))" :key="m.id">
-                                            <option :value="m.id" x-text="m.id" :selected="modelSettings.aligner_model === m.id"></option>
-                                        </template>
-                                    </select>
-                                </div>
                         </div>
                     </div>
+                </div>
+
+                <!-- Forced Aligner companion (STT models only — outside llm/vlm gate) -->
+                <div x-show="selectedModel?.model_type === 'audio_stt'"
+                     class="mt-6 p-4 bg-neutral-50 rounded-xl space-y-3">
+                    <div class="min-w-0">
+                        <span class="text-sm font-medium text-neutral-700">Forced Aligner</span>
+                        <p class="text-xs text-neutral-500 mt-0.5">仅 STT 模型有效。设置后，对该模型调 <code class="text-xs bg-neutral-100 px-1 rounded">/v1/audio/transcriptions</code> 带 <code class="text-xs bg-neutral-100 px-1 rounded">word_timestamps=true</code>，server 会自动 chain 这个 aligner，在 segments[0].words 里输出每字/词时间戳。Qwen3-ASR 系列必须靠它才能拿到 word timestamps（mlx-audio Qwen3-ASR 自己不返）。</p>
+                    </div>
+                    <select x-model="modelSettings.aligner_model"
+                            class="w-full px-3 py-2 text-sm border border-neutral-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-black bg-white">
+                        <option value="">不设 aligner（默认）</option>
+                        <template x-for="m in models.filter(m => /aligner/i.test(m.id))" :key="m.id">
+                            <option :value="m.id" x-text="m.id" :selected="modelSettings.aligner_model === m.id"></option>
+                        </template>
+                    </select>
                 </div>
 
                 <!-- Actions -->
