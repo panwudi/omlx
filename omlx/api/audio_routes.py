@@ -404,8 +404,14 @@ async def create_transcription(
     ``segments[0].words``. Default False preserves the existing response
     shape for every current caller.
 
-    Note: ``response_format`` and ``temperature`` are accepted for OpenAI API
-    compatibility but are not yet implemented — they are silently ignored.
+    ``temperature`` > 0 is forwarded to the backend's sampler (Qwen3-ASR,
+    Qwen2-Audio, Whisper all accept it). Useful for breaking decoder
+    degenerate loops on silent/repetitive audio. temperature=0 (default)
+    means greedy and is the no-op default for every backend, so we skip
+    forwarding it.
+
+    Note: ``response_format`` is accepted for OpenAI API compatibility but
+    is not yet implemented — it is silently ignored.
 
     ``max_tokens`` is an oMLX extension that raises the underlying model's
     output cap. Useful for long audio with models like VibeVoice-ASR whose
@@ -472,6 +478,13 @@ async def create_transcription(
             transcribe_kwargs["word_timestamps"] = True
         if prompt:
             transcribe_kwargs["prompt"] = prompt
+        # Forward `temperature` only when > 0. Most STT backends interpret
+        # temperature=0 as greedy (their default), and several reject the
+        # kwarg entirely; passing 0 just adds noise. >0 is the case that
+        # matters — used to break decoder degenerate loops (e.g. Qwen3-ASR
+        # on silent/quasi-silent mono input emits hundreds of repeated "嗯").
+        if temperature is not None and temperature > 0:
+            transcribe_kwargs["temperature"] = temperature
         if text is not None:
             transcribe_kwargs["text"] = text
 

@@ -147,6 +147,11 @@ class ModelSettingsRequest(BaseModel):
     vlm_mtp_draft_model: str | None = None
     vlm_mtp_draft_block_size: int | None = None
     reasoning_parser: str | None = None
+    # ForcedAligner companion for STT models. When set on an ASR (e.g.
+    # Qwen3-ASR-*), a /v1/audio/transcriptions call with word_timestamps=true
+    # auto-chains this aligner on the (audio, ASR transcript) pair and
+    # populates segments[0].words with per-character/word timestamps.
+    aligner_model: str | None = None
     is_pinned: bool | None = None
     is_default: bool | None = None
     # Security: per-model opt-in for trust_remote_code (issue #926)
@@ -1675,6 +1680,7 @@ async def list_models(is_admin: bool = Depends(require_admin)):
                 "vlm_mtp_enabled": settings.vlm_mtp_enabled,
                 "vlm_mtp_draft_model": settings.vlm_mtp_draft_model,
                 "vlm_mtp_draft_block_size": settings.vlm_mtp_draft_block_size,
+                "aligner_model": settings.aligner_model,
                 "is_pinned": settings.is_pinned,
                 "is_default": settings.is_default,
                 "trust_remote_code": settings.trust_remote_code,
@@ -1938,6 +1944,8 @@ async def update_model_settings(
         current_settings.dflash_enabled = new_dflash_enabled
     if "dflash_draft_model" in sent:
         current_settings.dflash_draft_model = request.dflash_draft_model or None
+    if "aligner_model" in sent:
+        current_settings.aligner_model = request.aligner_model or None
     if "dflash_draft_quant_enabled" in sent:
         current_settings.dflash_draft_quant_enabled = bool(request.dflash_draft_quant_enabled) if request.dflash_draft_quant_enabled is not None else None
     if "dflash_draft_quant_weight_bits" in sent:

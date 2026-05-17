@@ -1586,6 +1586,7 @@
                     vlm_mtp_enabled: settings.vlm_mtp_enabled || false,
                     vlm_mtp_draft_model: settings.vlm_mtp_draft_model || '',
                     vlm_mtp_draft_block_size: settings.vlm_mtp_draft_block_size ?? null,
+                    aligner_model: settings.aligner_model || '',
                     ctKwargEntries,
                     trust_remote_code: settings.trust_remote_code || false,
                 };
@@ -1702,6 +1703,7 @@
                                     && this.modelSettings.vlm_mtp_draft_block_size
                                     ? parseInt(this.modelSettings.vlm_mtp_draft_block_size)
                                     : null,
+                                aligner_model: this.modelSettings.aligner_model || null,
                                 trust_remote_code: this.modelSettings.trust_remote_code,
                             };
                         })()),
