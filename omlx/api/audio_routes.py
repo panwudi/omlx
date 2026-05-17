@@ -119,10 +119,14 @@ def _group_words_into_cues(
       * cue duration reaches ``max_duration`` seconds
       * the current word ends with a sentence-terminating punctuation
         (Chinese 。！？ or Western .!?)
+      * the speaker label changes (one cue per speaker for cleaner
+        rendering — applies only when words carry a ``speaker`` field
+        from diarization)
 
     Each input word entry should have ``word`` / ``start`` / ``end`` keys
     (the shape produced by the Whisper word-timestamps path and the
-    Qwen3-ForcedAligner auto-chain).
+    Qwen3-ForcedAligner auto-chain). The optional ``speaker`` key is
+    carried into the resulting cue.
     """
     if not words:
         return []
@@ -130,12 +134,35 @@ def _group_words_into_cues(
     cur_text = ""
     cur_start: float | None = None
     cur_end = 0.0
+    cur_speaker: str | None = None
     for w in words:
         token = (w.get("word") or "").strip("\n")
         if not token:
             continue
+        w_speaker = w.get("speaker")
+        # Force-close current cue if the speaker changed mid-stream.
+        speaker_change = (
+            cur_start is not None
+            and cur_speaker is not None
+            and w_speaker is not None
+            and w_speaker != cur_speaker
+        )
+        if speaker_change:
+            cue = {
+                "start": cur_start,
+                "end": max(cur_end, cur_start + 0.05),
+                "text": cur_text.strip(),
+            }
+            if cur_speaker:
+                cue["speaker"] = cur_speaker
+            cues.append(cue)
+            cur_text = ""
+            cur_start = None
+            cur_end = 0.0
+            cur_speaker = None
         if cur_start is None:
             cur_start = float(w.get("start", 0.0))
+            cur_speaker = w_speaker
         cur_text += token
         cur_end = float(w.get("end", cur_end))
         last = token[-1:] if token else ""
@@ -145,20 +172,27 @@ def _group_words_into_cues(
             or last in "。！？.!?"
         )
         if cue_full:
-            cues.append({
+            cue = {
                 "start": cur_start,
                 "end": max(cur_end, cur_start + 0.05),
                 "text": cur_text.strip(),
-            })
+            }
+            if cur_speaker:
+                cue["speaker"] = cur_speaker
+            cues.append(cue)
             cur_text = ""
             cur_start = None
             cur_end = 0.0
+            cur_speaker = None
     if cur_text.strip() and cur_start is not None:
-        cues.append({
+        cue = {
             "start": cur_start,
             "end": max(cur_end, cur_start + 0.05),
             "text": cur_text.strip(),
-        })
+        }
+        if cur_speaker:
+            cue["speaker"] = cur_speaker
+        cues.append(cue)
     return cues
 
 
@@ -205,10 +239,20 @@ def _build_subtitle(result: dict, fmt: str = "srt") -> str:
         lines.append("WEBVTT")
         lines.append("")
     for idx, cue in enumerate(cues, start=1):
+        speaker = cue.get("speaker")
+        text = cue["text"]
         if fmt == "srt":
             lines.append(str(idx))
-        lines.append(f"{fmt_time(cue['start'])} --> {fmt_time(cue['end'])}")
-        lines.append(cue["text"])
+            lines.append(f"{fmt_time(cue['start'])} --> {fmt_time(cue['end'])}")
+            # SRT has no standard speaker tag — most players that show
+            # speaker labels look for a "Speaker: text" prefix on the cue.
+            lines.append(f"{speaker}: {text}" if speaker else text)
+        else:  # vtt
+            lines.append(f"{fmt_time(cue['start'])} --> {fmt_time(cue['end'])}")
+            # WebVTT has a built-in voice tag: <v Speaker>text</v>.
+            lines.append(
+                f"<v {speaker}>{text}</v>" if speaker else text
+            )
         lines.append("")
     return "\n".join(lines)
 
@@ -510,6 +554,15 @@ async def create_transcription(
     max_tokens: Optional[int] = Form(None),
     word_timestamps: bool = Form(False),
     n: int = Form(1),
+    # ---- Diarization (Phase 1: energy backend for stereo; Phase 2: pyannote)
+    diarize_backend: str = Form("auto"),
+    left_speaker: Optional[str] = Form(None),
+    right_speaker: Optional[str] = Form(None),
+    diarize_threshold: float = Form(1.3),
+    speakers: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
+    min_speakers: Optional[int] = Form(2),
+    max_speakers: Optional[int] = Form(8),
 ):
     """OpenAI-compatible audio transcription endpoint (Speech-to-Text).
 
@@ -571,10 +624,40 @@ async def create_transcription(
                 "Supported: json, verbose_json, text, srt, vtt."
             ),
         )
+    # Diarization backend validation. Phase 1 implements energy + none + auto
+    # (auto routes to energy when stereo+L/R speakers given). pyannote backend
+    # is reserved for Phase 2 — reject with 501 if explicitly requested.
+    diarize_backend = (diarize_backend or "auto").lower().strip()
+    if diarize_backend not in ("auto", "energy", "pyannote", "none"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown diarize_backend='{diarize_backend}'. "
+                "Supported: auto, energy, pyannote, none."
+            ),
+        )
+    if diarize_backend == "pyannote":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "diarize_backend='pyannote' not yet implemented. "
+                "Phase 2 — requires pyannote.audio install + HF license "
+                "acceptance for pyannote/speaker-diarization-3.1. Use "
+                "'energy' (stereo only) or 'none' for now."
+            ),
+        )
     # SRT/VTT need word-level timestamps to produce useful subtitle pacing —
     # otherwise we'd emit one giant cue per ASR segment. Auto-enable when
     # the caller asked for subtitles unless they explicitly opted out.
     if response_format in ("srt", "vtt") and not word_timestamps:
+        word_timestamps = True
+    # Energy-mode diarization needs word-level alignment to attribute each
+    # word to a channel. Auto-enable when caller asked for energy diarize.
+    energy_diarize_requested = (
+        diarize_backend == "energy"
+        or (diarize_backend == "auto" and left_speaker and right_speaker)
+    )
+    if energy_diarize_requested and not word_timestamps:
         word_timestamps = True
     from omlx.engine.stt import STTEngine
     from omlx.exceptions import ModelNotFoundError
@@ -607,11 +690,59 @@ async def create_transcription(
     if suffix.lower() in _VIDEO_CONTAINERS:
         suffix = ".m4a"
     tmp_path = None
+    mono_tmp_path = None
+    stereo_audio_for_diarize = None
+    stereo_sr_for_diarize = None
     try:
         content = await _read_upload(file)
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             tmp.write(content)
+
+        # Energy-based diarization preprocessing: load the original audio with
+        # soundfile to keep the stereo buffer for per-word RMS analysis later,
+        # and feed a mono mix-down to the ASR (preserves the full-context
+        # decoding advantage over per-channel ASR — boundary words like
+        # "对" / "你/您" disambiguate much better when the model sees both
+        # sides of the conversation).
+        if energy_diarize_requested:
+            if not left_speaker or not right_speaker:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "energy diarization requires both left_speaker and "
+                        "right_speaker form fields."
+                    ),
+                )
+            try:
+                import soundfile as _sf
+                import numpy as _np
+                audio_data, audio_sr = _sf.read(tmp_path, dtype="float32")
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to read audio for diarization: {exc}",
+                ) from exc
+            if audio_data.ndim != 2 or audio_data.shape[1] != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "energy diarization requires stereo (2-channel) "
+                        f"input; got shape {audio_data.shape}. For mono or "
+                        "multi-speaker recordings use diarize_backend=pyannote "
+                        "(Phase 2, not yet available)."
+                    ),
+                )
+            stereo_audio_for_diarize = audio_data
+            stereo_sr_for_diarize = int(audio_sr)
+            # Down-mix to mono for ASR with 0.5 scaling to avoid clipping.
+            mono = (audio_data[:, 0] + audio_data[:, 1]) * 0.5
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=".wav"
+            ) as mtf:
+                mono_tmp_path = mtf.name
+            _sf.write(mono_tmp_path, mono, audio_sr, subtype="FLOAT")
+            tmp_path = mono_tmp_path
 
         # Effective max_tokens precedence: request > per-model setting (if any) >
         # model's own ``generate(max_tokens=...)`` default. The per-model lookup
@@ -749,6 +880,48 @@ async def create_transcription(
                 os.unlink(tmp_path)
             except OSError:
                 pass
+        if (
+            mono_tmp_path
+            and mono_tmp_path != tmp_path
+            and os.path.exists(mono_tmp_path)
+        ):
+            try:
+                os.unlink(mono_tmp_path)
+            except OSError:
+                pass
+
+    # Energy-based diarization: annotate each word with a speaker label
+    # based on which stereo channel dominates its time window. We do this
+    # AFTER ASR so we get the high-accuracy transcript from the mono mix
+    # (full conversational context for the decoder) PLUS speaker labels
+    # from the original stereo — without paying for two separate ASR runs.
+    if energy_diarize_requested and stereo_audio_for_diarize is not None:
+        from omlx.engine.diarize import energy_diarize_words
+        segments = result.get("segments") or []
+        for seg in segments:
+            words = seg.get("words") or []
+            if not words:
+                continue
+            labelled = energy_diarize_words(
+                stereo_audio_for_diarize,
+                stereo_sr_for_diarize,
+                words,
+                left_speaker=left_speaker,
+                right_speaker=right_speaker,
+                diarize_threshold=diarize_threshold,
+            )
+            seg["words"] = labelled
+            # Tag the segment itself with the dominant speaker (majority
+            # vote) so callers that don't drill into words still see
+            # something useful at the segment level.
+            counts: dict[str, int] = {}
+            for w in labelled:
+                sp = w.get("speaker")
+                if sp:
+                    counts[sp] = counts.get(sp, 0) + 1
+            if counts:
+                seg["speaker"] = max(counts, key=counts.get)
+        result["segments"] = segments
 
     _record_audio_request(resolved_model)
 
