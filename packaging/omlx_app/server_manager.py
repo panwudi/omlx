@@ -84,8 +84,14 @@ class ServerManager:
         self._consecutive_health_failures: int = 0
         self._max_health_failures: int = 3  # 3 consecutive failures → UNRESPONSIVE
 
-        # Auto-restart (only when process actually exits)
-        self._max_auto_restarts: int = 3
+        # Auto-restart (only when process actually exits).
+        # Upstream caps at 3 attempts before permanently entering ERROR and
+        # forcing the user to click Start in the menubar. The dev workflow
+        # for this fork kills the server many times per hour for reloads, so
+        # the cap is raised to effectively-never (~14 hours of pure-fail at
+        # the capped 5s backoff before giving up — long enough to catch a
+        # genuine boot loop, short enough that no human ever waits for it).
+        self._max_auto_restarts: int = 10_000
         self._auto_restart_count: int = 0
         self._last_healthy_time: float = 0.0
         self._stable_threshold: float = 60.0  # Reset counter after 60s of stable running
@@ -209,8 +215,10 @@ class ServerManager:
 
         self._cleanup_dead_process()
 
-        # Exponential backoff: 5s, 10s, 20s
-        backoff = 5 * (2 ** (self._auto_restart_count - 1))
+        # Exponential backoff, capped at 5 s. Upstream grows 5/10/20/40/…
+        # which is sensible under a real boot loop, but punishing in the
+        # dev workflow where the server is killed repeatedly to reload code.
+        backoff = min(5 * (2 ** (self._auto_restart_count - 1)), 5)
         self._stop_health_check.wait(backoff)
         if self._stop_health_check.is_set():
             return  # stop() was called during backoff
