@@ -551,6 +551,10 @@ async def create_transcription(
     min_p: Optional[float] = Form(None),
     repetition_penalty: Optional[float] = Form(None),
     repetition_context_size: Optional[int] = Form(None),
+    frequency_penalty: Optional[float] = Form(None),
+    frequency_context_size: Optional[int] = Form(None),
+    presence_penalty: Optional[float] = Form(None),
+    presence_context_size: Optional[int] = Form(None),
     max_tokens: Optional[int] = Form(None),
     word_timestamps: bool = Form(False),
     n: int = Form(1),
@@ -595,6 +599,17 @@ async def create_transcription(
     ``repetition_context_size=64`` is a typical fix. Qwen3-ASR and
     Qwen2-Audio accept all of these natively; Whisper has ``**decode_options``
     so unknown kwargs are silently ignored.
+
+    ``frequency_penalty`` / ``presence_penalty`` (with optional
+    ``frequency_context_size`` / ``presence_context_size``) are oMLX
+    extensions for Qwen3-ASR. Upstream mlx-audio's ``Qwen3ASRModel.generate``
+    hardcodes ``make_logits_processors`` to only emit a
+    ``repetition_penalty`` processor. When either of these is set the
+    engine takes an alternate path that builds the full mlx-lm logits-
+    processors stack (``repetition`` + ``frequency`` + ``presence``) and
+    drives ``_generate_single_chunk`` directly. Other STT backends do
+    not yet support these — the request is rejected with 400 if the
+    target model is not Qwen3-ASR.
 
     ``response_format`` supports ``json`` (default), ``verbose_json``,
     ``text``, ``srt`` and ``vtt``. SRT/VTT subtitle output auto-enables
@@ -788,6 +803,20 @@ async def create_transcription(
             transcribe_kwargs["repetition_penalty"] = repetition_penalty
         if repetition_context_size is not None:
             transcribe_kwargs["repetition_context_size"] = repetition_context_size
+        # Extended sampling (Qwen3-ASR only — engine validates and rejects
+        # otherwise). Upstream Qwen3ASRModel.generate hardcodes
+        # make_logits_processors(repetition_penalty=..., repetition_context_size=...)
+        # and ignores frequency / presence; the engine takes a parallel
+        # _generate_single_chunk loop with the full mlx-lm stack when either
+        # of these is set.
+        if frequency_penalty is not None:
+            transcribe_kwargs["frequency_penalty"] = frequency_penalty
+        if frequency_context_size is not None:
+            transcribe_kwargs["frequency_context_size"] = frequency_context_size
+        if presence_penalty is not None:
+            transcribe_kwargs["presence_penalty"] = presence_penalty
+        if presence_context_size is not None:
+            transcribe_kwargs["presence_context_size"] = presence_context_size
         if text is not None:
             transcribe_kwargs["text"] = text
 

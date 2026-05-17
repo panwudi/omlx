@@ -93,6 +93,159 @@ def _wrap_stt_load_error(model_name: str, exc: Exception) -> Exception:
     return exc
 
 
+# ---------------------------------------------------------------------------
+# Qwen3-ASR extended sampling (frequency_penalty / presence_penalty).
+#
+# Upstream mlx-audio's Qwen3ASRModel.generate calls make_logits_processors
+# with only (repetition_penalty, repetition_context_size); frequency and
+# presence are not exposed. mlx_lm.sample_utils.make_logits_processors does
+# support both natively, so we replicate the chunk loop here and build the
+# full processor stack ourselves. Activated only when one of the extended
+# fields is set; otherwise the normal model.generate() path runs unchanged.
+# ---------------------------------------------------------------------------
+
+_EXT_SAMPLING_FIELDS = ("frequency_penalty", "presence_penalty")
+
+
+def _has_ext_sampling(kwargs: dict) -> bool:
+    return any(kwargs.get(k) is not None for k in _EXT_SAMPLING_FIELDS)
+
+
+def _inner_asr_model(top_model: Any) -> Any:
+    """Unwrap mlx-audio's Model wrapper to the Qwen3ASRModel inside."""
+    return getattr(top_model, "_model", top_model)
+
+
+def _run_qwen3_asr_extended_sampling(
+    model: Any,
+    audio_path: str,
+    *,
+    language: str | None,
+    system_prompt: str | None,
+    max_tokens: int | None,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    min_p: float,
+    repetition_penalty: float | None,
+    repetition_context_size: int | None,
+    frequency_penalty: float | None,
+    frequency_context_size: int | None,
+    presence_penalty: float | None,
+    presence_context_size: int | None,
+) -> Any:
+    """Run Qwen3-ASR with the full mlx-lm logits-processor stack.
+
+    Returns a SimpleNamespace that duck-types as STTOutput (text, segments,
+    language, total_time, prompt_tokens, generation_tokens, total_tokens).
+    """
+    import time
+    import types
+
+    import numpy as np
+    from mlx_audio.stt.models.qwen3_asr.qwen3_asr import split_audio_into_chunks
+    from mlx_audio.stt.utils import load_audio
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+    start_time = time.time()
+
+    inner = _inner_asr_model(model)
+
+    audio_input = audio_path
+    if isinstance(audio_input, str):
+        audio_input = load_audio(audio_input)
+    audio_np = (
+        np.array(audio_input) if not isinstance(audio_input, np.ndarray) else audio_input
+    )
+
+    chunks = split_audio_into_chunks(
+        audio_np,
+        sr=inner.sample_rate,
+        chunk_duration=1200.0,
+        min_chunk_duration=1.0,
+    )
+
+    sampler = make_sampler(
+        temperature if temperature is not None else 0.0,
+        top_p if top_p is not None else 1.0,
+        min_p if min_p is not None else 0.0,
+        min_tokens_to_keep=1,
+        top_k=top_k if top_k is not None else 0,
+    )
+
+    lp_kwargs: dict = {}
+    if repetition_penalty is not None:
+        lp_kwargs["repetition_penalty"] = repetition_penalty
+        if repetition_context_size is not None:
+            lp_kwargs["repetition_context_size"] = repetition_context_size
+    if frequency_penalty is not None:
+        lp_kwargs["frequency_penalty"] = frequency_penalty
+        if frequency_context_size is not None:
+            lp_kwargs["frequency_context_size"] = frequency_context_size
+    if presence_penalty is not None:
+        lp_kwargs["presence_penalty"] = presence_penalty
+        if presence_context_size is not None:
+            lp_kwargs["presence_context_size"] = presence_context_size
+    logits_processors = make_logits_processors(**lp_kwargs) if lp_kwargs else None
+
+    all_texts: list[str] = []
+    segments: list[dict] = []
+    total_prompt_tokens = 0
+    total_generation_tokens = 0
+    remaining_tokens = max_tokens if max_tokens is not None else 8192
+
+    cur_language = language
+    for chunk_audio, offset_sec in chunks:
+        if remaining_tokens <= 0:
+            break
+        actual_chunk_duration = len(chunk_audio) / inner.sample_rate
+
+        text, prompt_toks, gen_toks = inner._generate_single_chunk(
+            chunk_audio,
+            max_tokens=remaining_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            language=cur_language,
+            prefill_step_size=2048,
+            verbose=False,
+            system_prompt=system_prompt,
+        )
+
+        if cur_language is None:
+            cur_language, text = inner.extract_language(text)
+
+        all_texts.append(text)
+        total_prompt_tokens += prompt_toks
+        total_generation_tokens += gen_toks
+        remaining_tokens -= gen_toks
+
+        segments.append({
+            "text": text,
+            "language": cur_language,
+            "start": float(offset_sec),
+            "end": float(offset_sec + actual_chunk_duration),
+        })
+
+        mx.clear_cache()
+
+    elapsed = time.time() - start_time
+    return types.SimpleNamespace(
+        text=" ".join(all_texts),
+        segments=segments,
+        language=[s["language"] for s in segments],
+        prompt_tokens=total_prompt_tokens,
+        generation_tokens=total_generation_tokens,
+        total_tokens=total_prompt_tokens + total_generation_tokens,
+        total_time=elapsed,
+        prompt_tps=(
+            total_prompt_tokens / elapsed if elapsed > 0 else 0.0
+        ),
+        generation_tps=(
+            total_generation_tokens / elapsed if elapsed > 0 else 0.0
+        ),
+    )
+
+
 def _validate_stt_processor(model_name: str, model: Any) -> None:
     """Fail fast if a Whisper-family mlx-audio model loaded without a processor."""
     module_name = type(model).__module__ or ""
@@ -323,6 +476,66 @@ class STTEngine(BaseNonStreamingEngine):
             # and would TypeError if we passed text=None blindly.
             if text is not None:
                 gen_kwargs["text"] = text
+
+            # Extended-sampling short-circuit. mlx-audio's Qwen3ASRModel.generate
+            # builds make_logits_processors with only (repetition_penalty,
+            # repetition_context_size) — frequency_penalty / presence_penalty
+            # have no path in. When either of these is set we route through a
+            # parallel chunk loop that calls _generate_single_chunk directly
+            # with the full mlx-lm processor stack. Only Qwen3-ASR is wired
+            # for this; other backends (Whisper, Qwen2-Audio, aligner, …) get
+            # 400 if the user tries.
+            if _has_ext_sampling(gen_kwargs):
+                inner_cls = type(_inner_asr_model(model)).__name__
+                if inner_cls != "Qwen3ASRModel":
+                    raise RuntimeError(
+                        f"frequency_penalty / presence_penalty currently only "
+                        f"supported on Qwen3-ASR backends; got {inner_cls}."
+                    )
+                if text is not None:
+                    raise RuntimeError(
+                        "frequency_penalty / presence_penalty cannot be combined "
+                        "with forced-aligner 'text' field."
+                    )
+                result = _run_qwen3_asr_extended_sampling(
+                    model,
+                    audio_path,
+                    language=gen_kwargs.get("language"),
+                    system_prompt=gen_kwargs.get("system_prompt"),
+                    max_tokens=gen_kwargs.get("max_tokens"),
+                    temperature=gen_kwargs.get("temperature", 0.0),
+                    top_p=gen_kwargs.get("top_p", 1.0),
+                    top_k=gen_kwargs.get("top_k", 0),
+                    min_p=gen_kwargs.get("min_p", 0.0),
+                    repetition_penalty=gen_kwargs.get("repetition_penalty"),
+                    repetition_context_size=gen_kwargs.get("repetition_context_size"),
+                    frequency_penalty=gen_kwargs.get("frequency_penalty"),
+                    frequency_context_size=gen_kwargs.get("frequency_context_size"),
+                    presence_penalty=gen_kwargs.get("presence_penalty"),
+                    presence_context_size=gen_kwargs.get("presence_context_size"),
+                )
+                # Fall through to the shared STTOutput → dict normalization
+                # path below (hasattr(result, "text") branch).
+                if hasattr(result, "text"):
+                    raw_lang = _normalize_language(
+                        getattr(result, "language", None)
+                    )
+                    if raw_lang is None:
+                        raw_lang = language
+                    raw_segs = getattr(result, "segments", None)
+                    segments = [
+                        _normalize_segment(s) for s in raw_segs
+                    ] if raw_segs else []
+                    return {
+                        "text": result.text or "",
+                        "language": raw_lang,
+                        "segments": segments,
+                        "duration": getattr(result, "total_time", 0.0),
+                    }
+                # Shouldn't happen — helper always returns SimpleNamespace.
+                raise RuntimeError(
+                    "extended-sampling helper returned unexpected shape"
+                )
 
             # Defensive filter: if the backend's generate() signature does
             # not have **kwargs, drop any gen_kwargs whose name isn't an
