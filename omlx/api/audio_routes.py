@@ -950,6 +950,77 @@ async def create_transcription(
                         "transcript without word timestamps",
                         aligner_name, resolved_model, exc,
                     )
+
+        # pyannote diarization (Phase 2). Mono / multi-speaker / conference
+        # audio. Must run BEFORE the finally block unlinks tmp_path —
+        # pyannote_diarize.diarize_words re-opens the file via soundfile
+        # to do its own 8 → 16 kHz resample + mono down-mix. Heavy load
+        # (~400 MB pyannote model loaded lazily on first call, gated HF
+        # license, requires HF_TOKEN in server env).
+        if pyannote_diarize_requested:
+            from omlx.engine.pyannote_diarize import diarize_words
+            try:
+                segments = result.get("segments") or []
+                # Flatten all words from all segments so pyannote sees the
+                # full timeline once (cheaper than per-segment, and pyannote
+                # needs full audio context anyway).
+                all_words: list[dict] = []
+                for seg in segments:
+                    ws = seg.get("words") or []
+                    all_words.extend(ws)
+                if all_words:
+                    # diarize_words mutates each word in place by adding
+                    # "speaker". If energy mode replaced tmp_path with a
+                    # mono mix, pyannote will run on that mix (which is
+                    # fine — single-speaker-per-channel down-mix loses
+                    # nothing for diarization); otherwise tmp_path is the
+                    # upload as-saved.
+                    diarize_words(
+                        tmp_path,
+                        all_words,
+                        speakers=parsed_speakers,
+                        num_speakers=num_speakers,
+                        min_speakers=(
+                            min_speakers if min_speakers != 2 else None
+                        ),
+                        max_speakers=(
+                            max_speakers if max_speakers != 8 else None
+                        ),
+                    )
+                    # Re-attach majority-vote segment-level speaker
+                    # (parallel to what energy mode does — so json /
+                    # verbose_json consumers see a useful segment.speaker
+                    # without drilling into words).
+                    for seg in segments:
+                        ws = seg.get("words") or []
+                        counts: dict[str, int] = {}
+                        for w in ws:
+                            sp = w.get("speaker")
+                            if sp:
+                                counts[sp] = counts.get(sp, 0) + 1
+                        if counts:
+                            seg["speaker"] = max(counts, key=counts.get)
+                    result["segments"] = segments
+            except (ImportError, RuntimeError) as exc:
+                # Surface install / license errors as 503 with the
+                # actionable message — the wrapper raises with full
+                # HF-license / pip-install instructions, so we just
+                # forward.
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"pyannote diarization unavailable: {exc}",
+                ) from exc
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "pyannote diarization failed for %s", resolved_model,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"pyannote diarization failed: {exc}",
+                ) from exc
+
     except HTTPException:
         raise
     except Exception as exc:
@@ -1002,69 +1073,6 @@ async def create_transcription(
             if counts:
                 seg["speaker"] = max(counts, key=counts.get)
         result["segments"] = segments
-
-    # pyannote diarization (Phase 2). Mono / multi-speaker / conference audio.
-    # Runs AFTER ASR + aligner-chain so we get word-level timestamps to
-    # annotate. Heavy load (~400 MB pyannote model loaded lazily on first
-    # call, gated HF license, requires HF_TOKEN in server env).
-    if pyannote_diarize_requested:
-        from omlx.engine.pyannote_diarize import diarize_words
-        try:
-            segments = result.get("segments") or []
-            # Flatten all words from all segments so pyannote sees the full
-            # timeline once (cheaper than per-segment, and pyannote needs
-            # full audio context anyway).
-            all_words: list[dict] = []
-            for seg in segments:
-                ws = seg.get("words") or []
-                all_words.extend(ws)
-            if all_words:
-                # diarize_words mutates each word in place by adding "speaker".
-                diarize_words(
-                    # Re-derive the original (unmixed) audio path. If energy
-                    # mode replaced tmp_path with a mono mix, that's fine —
-                    # pyannote will run on the mono mix; if not, tmp_path is
-                    # still the upload as-saved.
-                    tmp_path,
-                    all_words,
-                    speakers=parsed_speakers,
-                    num_speakers=num_speakers,
-                    min_speakers=(
-                        min_speakers if min_speakers != 2 else None
-                    ),
-                    max_speakers=(
-                        max_speakers if max_speakers != 8 else None
-                    ),
-                )
-                # Re-attach majority-vote segment-level speaker (parallel to
-                # what energy mode does — so json / verbose_json consumers
-                # see a useful segment.speaker without drilling into words).
-                for seg in segments:
-                    ws = seg.get("words") or []
-                    counts: dict[str, int] = {}
-                    for w in ws:
-                        sp = w.get("speaker")
-                        if sp:
-                            counts[sp] = counts.get(sp, 0) + 1
-                    if counts:
-                        seg["speaker"] = max(counts, key=counts.get)
-                result["segments"] = segments
-        except (ImportError, RuntimeError) as exc:
-            # Surface install / license errors as 503 with the actionable
-            # message — the wrapper raises with full HF-license / pip-install
-            # instructions, so we just forward.
-            raise HTTPException(
-                status_code=503,
-                detail=f"pyannote diarization unavailable: {exc}",
-            ) from exc
-        except Exception as exc:
-            logger.exception(
-                "pyannote diarization failed for %s", resolved_model,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail=f"pyannote diarization failed: {exc}",
-            ) from exc
 
     _record_audio_request(resolved_model)
 
