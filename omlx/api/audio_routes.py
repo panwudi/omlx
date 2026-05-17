@@ -89,6 +89,130 @@ def _get_settings_manager():
     return getattr(_server_state, "settings_manager", None)
 
 
+def _fmt_srt_time(t: float) -> str:
+    """SRT timestamp: HH:MM:SS,mmm"""
+    t = max(0.0, float(t))
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = int(t % 60)
+    ms = int(round((t - int(t)) * 1000))
+    if ms == 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _fmt_vtt_time(t: float) -> str:
+    """WebVTT timestamp: HH:MM:SS.mmm"""
+    return _fmt_srt_time(t).replace(",", ".")
+
+
+def _group_words_into_cues(
+    words: list[dict],
+    max_chars: int = 40,
+    max_duration: float = 5.0,
+) -> list[dict]:
+    """Pack consecutive word-level entries into subtitle cues.
+
+    A cue is closed when any of these holds:
+      * accumulated text reaches ``max_chars``
+      * cue duration reaches ``max_duration`` seconds
+      * the current word ends with a sentence-terminating punctuation
+        (Chinese 。！？ or Western .!?)
+
+    Each input word entry should have ``word`` / ``start`` / ``end`` keys
+    (the shape produced by the Whisper word-timestamps path and the
+    Qwen3-ForcedAligner auto-chain).
+    """
+    if not words:
+        return []
+    cues: list[dict] = []
+    cur_text = ""
+    cur_start: float | None = None
+    cur_end = 0.0
+    for w in words:
+        token = (w.get("word") or "").strip("\n")
+        if not token:
+            continue
+        if cur_start is None:
+            cur_start = float(w.get("start", 0.0))
+        cur_text += token
+        cur_end = float(w.get("end", cur_end))
+        last = token[-1:] if token else ""
+        cue_full = (
+            len(cur_text) >= max_chars
+            or (cur_end - cur_start) >= max_duration
+            or last in "。！？.!?"
+        )
+        if cue_full:
+            cues.append({
+                "start": cur_start,
+                "end": max(cur_end, cur_start + 0.05),
+                "text": cur_text.strip(),
+            })
+            cur_text = ""
+            cur_start = None
+            cur_end = 0.0
+    if cur_text.strip() and cur_start is not None:
+        cues.append({
+            "start": cur_start,
+            "end": max(cur_end, cur_start + 0.05),
+            "text": cur_text.strip(),
+        })
+    return cues
+
+
+def _build_subtitle(result: dict, fmt: str = "srt") -> str:
+    """Build SRT or WebVTT body from an STTEngine.transcribe() result.
+
+    Prefers word-level entries (segments[*].words from word_timestamps /
+    Forced-Aligner chain). Falls back to segment-level entries when no
+    word data is present (one cue per ASR segment).
+    """
+    segments = result.get("segments") or []
+    cues: list[dict] = []
+    # 1) Word-level path
+    all_words: list[dict] = []
+    for seg in segments:
+        ws = seg.get("words") or []
+        if ws:
+            all_words.extend(ws)
+    if all_words:
+        cues = _group_words_into_cues(all_words)
+    # 2) Fall back to segment-level
+    if not cues and segments:
+        cues = [
+            {
+                "start": float(s.get("start", 0.0)),
+                "end": float(s.get("end", 0.0)),
+                "text": (s.get("text") or "").strip(),
+            }
+            for s in segments
+            if (s.get("text") or "").strip()
+        ]
+    # 3) Final fallback: a single cue from the whole text + duration
+    if not cues and (result.get("text") or "").strip():
+        cues = [{
+            "start": 0.0,
+            "end": float(result.get("duration") or 0.0),
+            "text": result["text"].strip(),
+        }]
+
+    fmt = fmt.lower()
+    fmt_time = _fmt_vtt_time if fmt == "vtt" else _fmt_srt_time
+    lines: list[str] = []
+    if fmt == "vtt":
+        lines.append("WEBVTT")
+        lines.append("")
+    for idx, cue in enumerate(cues, start=1):
+        if fmt == "srt":
+            lines.append(str(idx))
+        lines.append(f"{fmt_time(cue['start'])} --> {fmt_time(cue['end'])}")
+        lines.append(cue["text"])
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _record_audio_request(model_id: str) -> None:
     """Record audio request count without treating bytes/chars as tokens."""
     try:
@@ -420,7 +544,11 @@ async def create_transcription(
     so unknown kwargs are silently ignored.
 
     ``response_format`` supports ``json`` (default), ``verbose_json``,
-    and ``text``. ``srt`` / ``vtt`` are not yet implemented (return 501).
+    ``text``, ``srt`` and ``vtt``. SRT/VTT subtitle output auto-enables
+    word_timestamps so the cue pacing isn't a single giant block; cues
+    are packed by sentence-ending punctuation, 40-char text limit, or
+    5-second duration cap, whichever comes first. When no word-level
+    data is available the output falls back to one cue per ASR segment.
 
     ``n`` must be 1. Multi-candidate transcription is rejected with 400.
 
@@ -435,25 +563,19 @@ async def create_transcription(
             detail="n must be 1; multi-candidate transcription is not supported.",
         )
     response_format = (response_format or "json").lower().strip()
-    if response_format in ("srt", "vtt"):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f"response_format='{response_format}' is not yet implemented. "
-                "Use 'json' (default), 'verbose_json', or 'text'. For "
-                "word-level timestamps, request 'verbose_json' with "
-                "word_timestamps=true; SRT/VTT formatting can be done "
-                "client-side from the returned segments[].words."
-            ),
-        )
-    if response_format not in ("json", "verbose_json", "text"):
+    if response_format not in ("json", "verbose_json", "text", "srt", "vtt"):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Unknown response_format='{response_format}'. "
-                "Supported: json, verbose_json, text."
+                "Supported: json, verbose_json, text, srt, vtt."
             ),
         )
+    # SRT/VTT need word-level timestamps to produce useful subtitle pacing —
+    # otherwise we'd emit one giant cue per ASR segment. Auto-enable when
+    # the caller asked for subtitles unless they explicitly opted out.
+    if response_format in ("srt", "vtt") and not word_timestamps:
+        word_timestamps = True
     from omlx.engine.stt import STTEngine
     from omlx.exceptions import ModelNotFoundError
 
@@ -636,6 +758,15 @@ async def create_transcription(
         return PlainTextResponse(
             content=result.get("text", ""),
             media_type="text/plain; charset=utf-8",
+        )
+
+    # SRT / VTT — assemble subtitle cues from segments/words.
+    if response_format in ("srt", "vtt"):
+        body = _build_subtitle(result, fmt=response_format)
+        return PlainTextResponse(
+            content=body,
+            media_type=("text/srt" if response_format == "srt"
+                        else "text/vtt") + "; charset=utf-8",
         )
 
     # json (default) and verbose_json both return the same shape today —
