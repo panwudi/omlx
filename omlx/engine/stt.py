@@ -158,6 +158,18 @@ class STTEngine(BaseNonStreamingEngine):
                 'Install it with: pip install "omlx[audio]"'
             ) from exc
 
+        # Apply mlx_audio per-layer quantization override patch (idempotent).
+        # Required for mixed-precision STT checkpoints, e.g. Qwen3-ASR
+        # audio8/text4 where audio_tower.* is 8-bit but text_model is 4-bit.
+        # Without this, mlx_audio's default class_predicate consults
+        # Qwen3ASRModel.model_quant_predicate first, which returns False for
+        # audio_tower.* and skips quantization, leaving 8-bit packed weights
+        # loaded as fp16 and crashing the first encoder matmul.
+        from ..patches.mlx_audio_per_layer_quant import (
+            apply_mlx_audio_per_layer_quant_patch,
+        )
+        apply_mlx_audio_per_layer_quant_patch()
+
         model_name = self._model_name
 
         def _load_sync():
