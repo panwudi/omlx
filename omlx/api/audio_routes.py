@@ -558,7 +558,8 @@ async def create_transcription(
     max_tokens: Optional[int] = Form(None),
     word_timestamps: bool = Form(False),
     n: int = Form(1),
-    # ---- Diarization (Phase 1: energy backend for stereo; Phase 2: pyannote)
+    # ---- Diarization: Phase 1 energy backend for stereo+L/R, Phase 2 pyannote
+    # for mono / multi-speaker / conference audio.
     diarize_backend: str = Form("auto"),
     left_speaker: Optional[str] = Form(None),
     right_speaker: Optional[str] = Form(None),
@@ -624,6 +625,27 @@ async def create_transcription(
     output cap. Useful for long audio with models like VibeVoice-ASR whose
     mlx-audio default (8192) truncates ~24 min files. When omitted, the
     model's own default applies.
+
+    ``diarize_backend`` selects the speaker-attribution backend:
+      * ``energy`` — stereo only; per-word RMS comparison of L/R channels.
+        Requires both ``left_speaker`` and ``right_speaker`` form fields.
+      * ``pyannote`` — mono / multi-speaker; runs pyannote-audio's
+        speaker-diarization-3.1 pipeline. First call lazily downloads and
+        loads the ~400 MB model; subsequent calls are free. Requires the
+        HuggingFace gated license at hf.co/pyannote/speaker-diarization-3.1
+        to have been accepted by the running server's HF_TOKEN account.
+      * ``auto`` (default) — energy when stereo + L/R given; pyannote when
+        any of the multi-speaker fields (``speakers`` / ``num_speakers`` /
+        non-default ``min_speakers``-``max_speakers``) is set; ``none``
+        otherwise. The "signal of intent" gate keeps plain transcription
+        requests from accidentally loading the pyannote weights.
+      * ``none`` — skip diarization entirely.
+
+    ``speakers`` is a comma-separated canonical name list. First pyannote
+    label encountered maps to speakers[0], next new label to speakers[1],
+    etc. Excess raw labels fall back to anonymous ``speaker_N``.
+    ``num_speakers`` constrains pyannote to exactly N speakers;
+    ``min_speakers`` / ``max_speakers`` are soft bounds for auto-detect.
     """
     if n != 1:
         raise HTTPException(
@@ -651,16 +673,10 @@ async def create_transcription(
                 "Supported: auto, energy, pyannote, none."
             ),
         )
-    if diarize_backend == "pyannote":
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "diarize_backend='pyannote' not yet implemented. "
-                "Phase 2 — requires pyannote.audio install + HF license "
-                "acceptance for pyannote/speaker-diarization-3.1. Use "
-                "'energy' (stereo only) or 'none' for now."
-            ),
-        )
+    # pyannote backend (Phase 2) is now wired below the ASR call. Its install
+    # / license check happens lazily inside omlx.engine.pyannote_diarize on
+    # first use — a 501 here would block requests on a misconfigured site
+    # before we have a chance to give the actionable error from the engine.
     # SRT/VTT need word-level timestamps to produce useful subtitle pacing —
     # otherwise we'd emit one giant cue per ASR segment. Auto-enable when
     # the caller asked for subtitles unless they explicitly opted out.
@@ -673,6 +689,41 @@ async def create_transcription(
         or (diarize_backend == "auto" and left_speaker and right_speaker)
     )
     if energy_diarize_requested and not word_timestamps:
+        word_timestamps = True
+    # pyannote (Phase 2) routing. Explicit when diarize_backend=pyannote;
+    # auto routes here when the caller signalled diarization intent via any
+    # of the multi-speaker form fields (speakers / num_speakers / etc) but
+    # didn't give the stereo L/R pair that energy mode needs. This mirrors
+    # the energy auto-route — "auto + signal of intent" — so that
+    # plain transcription requests don't accidentally pull the 400 MB
+    # pyannote weights into memory.
+    parsed_speakers: Optional[list[str]] = None
+    if speakers:
+        parsed_speakers = [
+            s.strip() for s in speakers.split(",") if s.strip()
+        ] or None
+    pyannote_intent = bool(
+        parsed_speakers
+        or num_speakers is not None
+        or (
+            (min_speakers is not None or max_speakers is not None)
+            # min_speakers default is 2, max_speakers default is 8 — those
+            # are not "intent" signals on their own. Treat as intent only
+            # when explicitly different from the defaults, i.e. user
+            # actually overrode something. (Cheap heuristic; future
+            # cleanup: switch min/max defaults to None.)
+            and (min_speakers != 2 or max_speakers != 8)
+        )
+    )
+    pyannote_diarize_requested = (
+        diarize_backend == "pyannote"
+        or (
+            diarize_backend == "auto"
+            and not energy_diarize_requested
+            and pyannote_intent
+        )
+    )
+    if pyannote_diarize_requested and not word_timestamps:
         word_timestamps = True
     from omlx.engine.stt import STTEngine
     from omlx.exceptions import ModelNotFoundError
@@ -745,7 +796,7 @@ async def create_transcription(
                         "energy diarization requires stereo (2-channel) "
                         f"input; got shape {audio_data.shape}. For mono or "
                         "multi-speaker recordings use diarize_backend=pyannote "
-                        "(Phase 2, not yet available)."
+                        "(set speakers / num_speakers to activate auto-routing)."
                     ),
                 )
             stereo_audio_for_diarize = audio_data
@@ -951,6 +1002,69 @@ async def create_transcription(
             if counts:
                 seg["speaker"] = max(counts, key=counts.get)
         result["segments"] = segments
+
+    # pyannote diarization (Phase 2). Mono / multi-speaker / conference audio.
+    # Runs AFTER ASR + aligner-chain so we get word-level timestamps to
+    # annotate. Heavy load (~400 MB pyannote model loaded lazily on first
+    # call, gated HF license, requires HF_TOKEN in server env).
+    if pyannote_diarize_requested:
+        from omlx.engine.pyannote_diarize import diarize_words
+        try:
+            segments = result.get("segments") or []
+            # Flatten all words from all segments so pyannote sees the full
+            # timeline once (cheaper than per-segment, and pyannote needs
+            # full audio context anyway).
+            all_words: list[dict] = []
+            for seg in segments:
+                ws = seg.get("words") or []
+                all_words.extend(ws)
+            if all_words:
+                # diarize_words mutates each word in place by adding "speaker".
+                diarize_words(
+                    # Re-derive the original (unmixed) audio path. If energy
+                    # mode replaced tmp_path with a mono mix, that's fine —
+                    # pyannote will run on the mono mix; if not, tmp_path is
+                    # still the upload as-saved.
+                    tmp_path,
+                    all_words,
+                    speakers=parsed_speakers,
+                    num_speakers=num_speakers,
+                    min_speakers=(
+                        min_speakers if min_speakers != 2 else None
+                    ),
+                    max_speakers=(
+                        max_speakers if max_speakers != 8 else None
+                    ),
+                )
+                # Re-attach majority-vote segment-level speaker (parallel to
+                # what energy mode does — so json / verbose_json consumers
+                # see a useful segment.speaker without drilling into words).
+                for seg in segments:
+                    ws = seg.get("words") or []
+                    counts: dict[str, int] = {}
+                    for w in ws:
+                        sp = w.get("speaker")
+                        if sp:
+                            counts[sp] = counts.get(sp, 0) + 1
+                    if counts:
+                        seg["speaker"] = max(counts, key=counts.get)
+                result["segments"] = segments
+        except (ImportError, RuntimeError) as exc:
+            # Surface install / license errors as 503 with the actionable
+            # message — the wrapper raises with full HF-license / pip-install
+            # instructions, so we just forward.
+            raise HTTPException(
+                status_code=503,
+                detail=f"pyannote diarization unavailable: {exc}",
+            ) from exc
+        except Exception as exc:
+            logger.exception(
+                "pyannote diarization failed for %s", resolved_model,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"pyannote diarization failed: {exc}",
+            ) from exc
 
     _record_audio_request(resolved_model)
 
