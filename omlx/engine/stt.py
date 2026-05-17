@@ -277,16 +277,27 @@ class STTEngine(BaseNonStreamingEngine):
                 gen_kwargs["language"] = generate_language
 
             # OpenAI's `prompt` field is forwarded to the backend's prompt-style
-            # kwarg if one exists. Whisper takes ``initial_prompt``; Qwen2-Audio
-            # and several others take ``prompt``. Backends without any
-            # prompt-style kwarg drop the field silently.
+            # kwarg if one exists. Different backends use different names:
+            #   Whisper        → initial_prompt
+            #   Qwen2-Audio    → prompt
+            #   Qwen3-ASR      → system_prompt
+            #   others         → context / previous_text
+            # We inspect the model's generate() signature and pick the first
+            # match in priority order. Backends without any prompt-style kwarg
+            # drop the field silently.
             user_prompt = gen_kwargs.pop("prompt", None)
             if user_prompt:
                 import inspect
                 resolved_prompt_kwarg = None
                 try:
                     params = inspect.signature(model.generate).parameters
-                    for candidate in ("initial_prompt", "prompt", "context", "previous_text"):
+                    for candidate in (
+                        "initial_prompt",
+                        "prompt",
+                        "system_prompt",
+                        "context",
+                        "previous_text",
+                    ):
                         if candidate in params:
                             resolved_prompt_kwarg = candidate
                             break
