@@ -159,6 +159,16 @@ class ModelSettings:
     vlm_mtp_draft_model: Optional[str] = None  # Path / model id of the assistant drafter
     vlm_mtp_draft_block_size: Optional[int] = None  # Tokens per draft round (None = mlx-vlm default)
 
+    # ForcedAligner companion for STT models.
+    # When set on an ASR model (e.g. Qwen3-ASR-1.7B-audio8-text4-mlx) and a
+    # /v1/audio/transcriptions request has word_timestamps=true, the server
+    # transcribes with this model first, then auto-loads the named aligner
+    # (e.g. Qwen3-ForcedAligner-0.6B-4bit) and runs it on (audio, transcript)
+    # to populate segments[].words with char/word-level start/end times.
+    # Without this, word_timestamps is a no-op on Qwen3-ASR (mlx-audio's ASR
+    # model returns only coarse segment-level times).
+    aligner_model: Optional[str] = None
+
     # Model management flags
     is_pinned: bool = False
     is_default: bool = False  # Only one model can be default

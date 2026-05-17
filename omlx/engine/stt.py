@@ -215,6 +215,7 @@ class STTEngine(BaseNonStreamingEngine):
         self,
         audio_path: str,
         language: str | None = None,
+        text: str | None = None,
         **kwargs,
     ) -> dict[str, Any]:
         """
@@ -223,13 +224,17 @@ class STTEngine(BaseNonStreamingEngine):
         Args:
             audio_path: Path to the audio file to transcribe
             language: Optional language code (e.g. 'en', 'fr')
+            text: Reference transcript for forced-alignment models
+                (e.g. Qwen3-ForcedAligner). Ignored by ASR models that
+                don't accept a ``text`` kwarg.
             **kwargs: Additional model-specific parameters
 
         Returns:
             Dictionary with keys:
-                text: Transcribed text
+                text: Transcribed text (ASR) or reconstructed from items (aligner)
                 language: Detected or specified language
                 segments: List of timed segments (may be empty)
+                words: For aligner models, list of {word, start, end} dicts
                 duration: Audio duration in seconds
         """
         if self._model is None:
@@ -312,10 +317,72 @@ class STTEngine(BaseNonStreamingEngine):
                         type(model).__name__, len(user_prompt),
                     )
 
+            # Forced-aligner reference text — only inject if caller provided
+            # one and the backend accepts it positionally. ASR models like
+            # Qwen3-ASR / Qwen2-Audio / Whisper don't take a ``text`` kwarg
+            # and would TypeError if we passed text=None blindly.
+            if text is not None:
+                gen_kwargs["text"] = text
+
             result = model.generate(audio_path, **gen_kwargs)
 
-            # result is typically an STTOutput dataclass with:
-            # text, segments, language, total_time, etc.
+            # Two shapes possible:
+            #  - STTOutput (text, segments, language, total_time, ...) for ASR.
+            #  - ForcedAlignResult for ForcedAligner. NOTE: at runtime this also
+            #    exposes .text and .segments (each as a one-item-per-char dict),
+            #    so the cheap ``hasattr(result, "items")`` check is not enough —
+            #    we must also verify the items list contains ForcedAlignItem-
+            #    shaped objects (with .start_time / .end_time, not plain dicts).
+            #  - List[ForcedAlignResult] for batch alignment (we always call
+            #    single-audio here, so unwrap a single-element list).
+            if isinstance(result, list) and result and hasattr(result[0], "items"):
+                result = result[0]
+
+            items_attr = getattr(result, "items", None)
+            is_aligner_result = False
+            if items_attr is not None and not callable(items_attr):
+                try:
+                    first = next(iter(items_attr), None)
+                except TypeError:
+                    first = None
+                if first is not None and hasattr(first, "start_time"):
+                    is_aligner_result = True
+
+            if is_aligner_result:
+                # ForcedAligner output. Wrap as a single segment containing the
+                # words array so the API response shape stays the same whether
+                # the caller hit an ASR directly or the aligner standalone.
+                items = list(items_attr)
+                words = [
+                    {
+                        "word": it.text,
+                        "start": float(it.start_time),
+                        "end": float(it.end_time),
+                    }
+                    for it in items
+                ]
+                reconstructed = "".join(it.text for it in items)
+                start = float(min(
+                    (it.start_time for it in items), default=0.0
+                ))
+                end = float(max(
+                    (it.end_time for it in items), default=0.0
+                ))
+                segment = {
+                    "text": reconstructed,
+                    "language": language,
+                    "start": start,
+                    "end": end,
+                    "words": words,
+                }
+                return {
+                    "text": reconstructed,
+                    "language": language,
+                    "segments": [segment],
+                    "words": words,
+                    "duration": end,
+                }
+
             if hasattr(result, "text"):
                 raw_lang = _normalize_language(
                     getattr(result, "language", None)

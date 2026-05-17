@@ -375,6 +375,7 @@ async def create_transcription(
     model: str = Form(...),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
+    text: Optional[str] = Form(None),
     response_format: str = Form("json"),
     temperature: float = Form(0.0),
     max_tokens: Optional[int] = Form(None),
@@ -388,6 +389,21 @@ async def create_transcription(
     names or stylistic preferences. Backends without any prompt-style kwarg
     drop it silently.
 
+    ``text`` is a reference transcript for forced-alignment models like
+    Qwen3-ForcedAligner. Calling this endpoint with ``model=<aligner>`` +
+    ``text=<known transcript>`` returns word/char-level timestamps. Without
+    a ``text`` the aligner model returns 400.
+
+    ``word_timestamps`` is an oMLX extension. For Whisper-family models it
+    exposes mlx-audio's native word-level alignment (each segment in the
+    response gets a ``words`` array of ``{word, start, end, probability}``).
+    For Qwen3-ASR and other backends without native word-level alignment,
+    if the model has ``aligner_model`` set in its ModelSettings, the server
+    automatically runs that aligner (e.g. Qwen3-ForcedAligner-0.6B-4bit)
+    on the (audio, ASR transcript) pair and merges the result into
+    ``segments[0].words``. Default False preserves the existing response
+    shape for every current caller.
+
     Note: ``response_format`` and ``temperature`` are accepted for OpenAI API
     compatibility but are not yet implemented — they are silently ignored.
 
@@ -395,12 +411,6 @@ async def create_transcription(
     output cap. Useful for long audio with models like VibeVoice-ASR whose
     mlx-audio default (8192) truncates ~24 min files. When omitted, the
     model's own default applies.
-
-    ``word_timestamps`` is an oMLX extension that exposes mlx-audio's native
-    word-level alignment for Whisper models. When True, each segment in the
-    response includes a ``words`` array of
-    ``{word, start, end, probability}`` objects. Default False preserves the
-    existing response shape for every current caller.
     """
     from omlx.engine.stt import STTEngine
     from omlx.exceptions import ModelNotFoundError
@@ -462,7 +472,88 @@ async def create_transcription(
             transcribe_kwargs["word_timestamps"] = True
         if prompt:
             transcribe_kwargs["prompt"] = prompt
+        if text is not None:
+            transcribe_kwargs["text"] = text
+
+        # Detect aligner model so we can either run alignment (text given) or
+        # reject cleanly (text missing) instead of crashing on a missing
+        # positional argument deep inside mlx-audio.
+        is_aligner = False
+        try:
+            inner = getattr(getattr(engine, "_model", None), "_model", None)
+            is_aligner = type(inner).__name__ == "ForcedAlignerModel"
+        except Exception:
+            pass
+        if is_aligner and text is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model '{resolved_model}' is a forced aligner and requires "
+                    "a 'text' form field with the reference transcript. To get "
+                    "word-level timestamps automatically from audio alone, call "
+                    "an ASR model with word_timestamps=true; the server will "
+                    "auto-chain its configured aligner."
+                ),
+            )
+
         result = await engine.transcribe(tmp_path, **transcribe_kwargs)
+
+        # Auto-chain: when caller asked for word_timestamps on an ASR that has
+        # an aligner companion configured (ModelSettings.aligner_model), run
+        # the aligner on the (same audio, ASR transcript) pair and graft the
+        # word-level timestamps into segments[0].words.
+        if (
+            word_timestamps
+            and not is_aligner
+            and result.get("text")
+            and not (result.get("segments") and result["segments"][0].get("words"))
+        ):
+            aligner_name = None
+            sm = _get_settings_manager()
+            if sm is not None:
+                try:
+                    ms = sm.get_settings(resolved_model)
+                    if ms is not None:
+                        aligner_name = getattr(ms, "aligner_model", None)
+                except Exception:
+                    pass
+            if aligner_name:
+                try:
+                    aligner_resolved = _resolve_model(aligner_name)
+                    aligner_engine = await pool.get_engine(aligner_resolved)
+                    if isinstance(aligner_engine, STTEngine):
+                        align_kwargs: dict = {"language": language}
+                        if effective_max_tokens is not None:
+                            align_kwargs["max_tokens"] = effective_max_tokens
+                        align_kwargs["text"] = result["text"]
+                        align_result = await aligner_engine.transcribe(
+                            tmp_path, **align_kwargs
+                        )
+                        words = align_result.get("words") or []
+                        if words:
+                            segments = result.get("segments") or []
+                            if not segments:
+                                segments = [{
+                                    "text": result["text"],
+                                    "language": result.get("language"),
+                                    "start": float(min(
+                                        (w["start"] for w in words), default=0.0
+                                    )),
+                                    "end": float(max(
+                                        (w["end"] for w in words),
+                                        default=result.get("duration", 0.0),
+                                    )),
+                                }]
+                            segments[0] = {**segments[0], "words": words}
+                            result["segments"] = segments
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Aligner companion %s failed for %s: %s — returning "
+                        "transcript without word timestamps",
+                        aligner_name, resolved_model, exc,
+                    )
     except HTTPException:
         raise
     except Exception as exc:
